@@ -167,6 +167,12 @@ def _country_to_profile(country: str) -> str:
         "united-kingdom": "uk",
         "ca": "ca",
         "canada": "ca",
+        "jp": "jp",
+        "japan": "jp",
+        "sg": "sg",
+        "singapore": "sg",
+        "au": "au",
+        "australia": "au",
     }
     profile = defaults.get(country_lower)
     if profile:
@@ -277,8 +283,16 @@ def _estimate_latency(country: str) -> int:
         "de": 82,
         "france": 86,
         "fr": 86,
+        "uk": 80,
+        "gb": 80,
         "canada": 72,
         "ca": 72,
+        "japan": 128,
+        "jp": 128,
+        "singapore": 118,
+        "sg": 118,
+        "australia": 130,
+        "au": 130,
     }
     baseline = regional_defaults.get(country_lower, 90)
     return max(20, baseline + random.randint(-12, 18))
@@ -436,4 +450,3 @@ def security_snapshot() -> dict[str, object]:
         "routing_tables": routing_tables,
         "nftables_status": nftables_status,
     }
-

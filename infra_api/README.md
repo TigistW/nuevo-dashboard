@@ -35,6 +35,21 @@ Inside `MICROVM_HOME`, ensure these scripts exist and are executable:
 
 If your script names differ, override them in env.
 
+### 2.1) Apply scripts to the two Linux folders
+
+From your repo folder on Linux:
+
+```bash
+cd ~/nuevo-dashboard
+chmod +x scripts/*.sh
+cp scripts/common.sh ~/microvm/common.sh
+cp scripts/launch_vm.sh scripts/stop_vm.sh scripts/restart_vm.sh scripts/delete_vm.sh ~/microvm/
+cp scripts/rotate_tunnel.sh scripts/register_tunnel.sh ~/microvm/
+chmod +x ~/microvm/*.sh
+```
+
+`rotate_tunnel.sh` and `register_tunnel.sh` still control Docker services in `~/microvm-proxy` via `MICROVM_PROXY_HOME`, so this keeps both folders coordinated.
+
 ## 3) Run the API on Linux
 
 ```bash
@@ -89,6 +104,7 @@ You can run this in two valid patterns.
 
 - `COUNTRY_PROFILE_MAP` lets you map dashboard/backend country names to OVPN profile names.
 - Example: `COUNTRY_PROFILE_MAP=usa=us,spain=es,germany=de,canada=ca`
+- Built-in aliases include: `us`, `de`, `ca`, `es`, `fr`, `uk`, `jp`, `sg`, `au`.
 
 ## 6) Health check
 

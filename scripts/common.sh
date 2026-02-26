@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MICROVM_HOME="${MICROVM_HOME:-$HOME/microvm}"
 MICROVM_PROXY_HOME="${MICROVM_PROXY_HOME:-$HOME/microvm-proxy}"
-PROXY_SERVICE_NAME="${PROXY_SERVICE_NAME:-vpn-proxy}"
+PROXY_SERVICE_NAME="${PROXY_SERVICE_NAME:-proxy-us}"
 PROXY_SELECTION_MODE="${PROXY_SELECTION_MODE:-auto}"
 COUNTRY_PROFILE_MAP="${COUNTRY_PROFILE_MAP:-}"
 PROFILE_SERVICE_MAP="${PROFILE_SERVICE_MAP:-}"
@@ -151,6 +151,9 @@ country_to_profile() {
     fr|france) echo "fr" ;;
     uk|gb|united-kingdom|great-britain) echo "uk" ;;
     ca|canada) echo "ca" ;;
+    jp|japan) echo "jp" ;;
+    sg|singapore) echo "sg" ;;
+    au|australia) echo "au" ;;
     *)
       if [[ -f "$MICROVM_PROXY_HOME/configs/$country_lower.ovpn" ]]; then
         echo "$country_lower"

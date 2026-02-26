@@ -117,6 +117,17 @@ export interface ApiJobEnqueueResponse {
   status: string;
 }
 
+export interface ApiTerminalCommandResponse {
+  output: string;
+}
+
+export interface ApiWorkflowExecutionResponse {
+  status: string;
+  workflow_id: string;
+  timestamp: string;
+  operation_id: string;
+}
+
 export function listMicroVms(): Promise<ApiMicroVm[]> {
   return requestJson<ApiMicroVm[]>("/api/v1/orchestrator/list", "GET");
 }
@@ -144,6 +155,13 @@ export function restartMicroVm(vmId: string): Promise<ApiOperationStatus> {
 
 export function deleteMicroVm(vmId: string): Promise<ApiOperationStatus> {
   return requestJson<ApiOperationStatus>(`/api/v1/orchestrator/${encodeURIComponent(vmId)}`, "DELETE");
+}
+
+export function getOperation(operationId: string): Promise<ApiOperationStatus> {
+  return requestJson<ApiOperationStatus>(
+    `/api/v1/orchestrator/operations/${encodeURIComponent(operationId)}`,
+    "GET"
+  );
 }
 
 export function listTunnels(): Promise<ApiTunnel[]> {
@@ -178,10 +196,27 @@ export function testIsolation(): Promise<{ status: string; details: string }> {
   return requestJson<{ status: string; details: string }>("/api/v1/security/test-isolation", "POST");
 }
 
+export function syncFingerprint(vmId: string): Promise<ApiOperationStatus> {
+  return requestJson<ApiOperationStatus>(
+    `/api/v1/governance/fingerprint/sync/${encodeURIComponent(vmId)}`,
+    "POST"
+  );
+}
+
 export function listSchedulerQueue(): Promise<ApiSchedulerTask[]> {
   return requestJson<ApiSchedulerTask[]>("/api/v1/automation/scheduler/queue", "GET");
 }
 
 export function enqueueSchedulerJob(payload: ApiSchedulerTask): Promise<ApiJobEnqueueResponse> {
   return requestJson<ApiJobEnqueueResponse>("/api/v1/automation/scheduler/jobs", "POST", payload);
+}
+
+export function terminalCommand(vmId: string, command: string): Promise<ApiTerminalCommandResponse> {
+  const query = new URLSearchParams({ vm_id: vmId, command });
+  return requestJson<ApiTerminalCommandResponse>(`/api/v1/repository/terminal/command?${query.toString()}`, "POST");
+}
+
+export function executeWorkflow(workflowId: string): Promise<ApiWorkflowExecutionResponse> {
+  const query = new URLSearchParams({ workflow_id: workflowId });
+  return requestJson<ApiWorkflowExecutionResponse>(`/api/v1/repository/workflows/execute?${query.toString()}`, "POST");
 }
