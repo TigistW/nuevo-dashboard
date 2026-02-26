@@ -1,0 +1,5 @@
+{
+  "name": "Colab Farm Dashboard",
+  "description": "A futuristic monitoring and management system for distributed Google Colab account clusters, featuring real-time task queuing, account rotation, and system metrics.",
+  "requestFramePermissions": []
+}
