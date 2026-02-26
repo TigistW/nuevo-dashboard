@@ -477,7 +477,14 @@ const WorkflowBuilder: React.FC = () => {
           const dnsOk = (dns.status || '').toLowerCase() === 'secure';
           const isoOk = (isolation.status || '').toLowerCase() === 'passed';
           if (!dnsOk || !isoOk) {
-            throw new Error(`Verification failed (dns=${dns.status}, isolation=${isolation.status}).`);
+            const dnsDetails = !dnsOk
+              ? ` leaks=${(dns.leaks || []).map((item) => `${item.vm_id}:${item.issue}`).join('; ') || 'unknown'}`
+              : '';
+            const isolationDetails = !isoOk ? ` details=${isolation.details || 'unknown'}` : '';
+            const message = `Verification failed (dns=${dns.status}${dnsDetails}, isolation=${isolation.status}${isolationDetails}).`;
+            nextSteps = setStepState(nextSteps, step.id, { message });
+            setSteps(nextSteps);
+            throw new Error(message);
           }
 
           nextSteps = setStepState(nextSteps, step.id, { status: 'succeeded', message: 'Verification passed.' });
