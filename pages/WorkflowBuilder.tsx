@@ -97,6 +97,13 @@ function safeNowIso(): string {
   return new Date().toISOString();
 }
 
+function generateSafeVmId(): string {
+  const timePart = Date.now().toString(36);
+  const randomPart = Math.random().toString(36).slice(2, 6);
+  const suffix = `${timePart}${randomPart}`.slice(-8);
+  return `vm-${suffix}`;
+}
+
 function normalizeStepStatus(value: WorkflowStep['status']): StepStatus {
   return value || 'pending';
 }
@@ -355,7 +362,7 @@ const WorkflowBuilder: React.FC = () => {
         persistSnapshot('running');
 
         if (step.type === 'infra') {
-          const vmId = (config.vmId || '').trim() || `vm-${Date.now()}`;
+          const vmId = (config.vmId || '').trim() || generateSafeVmId();
           try {
             await createMicroVm({
               id: vmId,

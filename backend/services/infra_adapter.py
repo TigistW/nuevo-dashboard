@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import random
@@ -22,6 +23,7 @@ ROUTING_TABLE_PATTERN = re.compile(r"\btable\s+(\S+)\b")
 ROUTING_DEVICE_PATTERN = re.compile(r"\bdev\s+(\S+)\b")
 PUBLIC_IPV4_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 REPO_ROOT = Path(__file__).resolve().parents[2]
+IFACE_NAME_MAX_LEN = 15
 
 ALLOWED_COMMANDS = {
     "ansible-playbook",
@@ -166,7 +168,7 @@ class InfrastructureAdapter:
         _ensure_safe_token("country", country.replace(" ", "-"))
 
         rootfs_path = self._resolve_rootfs(template_base_image)
-        tap_dev = f"{settings.vm_tap_prefix}{_slug(vm_id)}"
+        tap_dev = _safe_iface_name(settings.vm_tap_prefix, vm_id)
         namespace = f"{settings.vm_namespace_prefix}{_slug(vm_id)}"
         fallback_runs: list[CommandRun] = []
 
@@ -318,7 +320,7 @@ class InfrastructureAdapter:
     def delete_vm(self, vm_id: str) -> list[CommandRun]:
         _ensure_safe_token("vm_id", vm_id)
         namespace = f"{settings.vm_namespace_prefix}{_slug(vm_id)}"
-        tap_dev = f"{settings.vm_tap_prefix}{_slug(vm_id)}"
+        tap_dev = _safe_iface_name(settings.vm_tap_prefix, vm_id)
         fallback_runs: list[CommandRun] = []
 
         if self._should_try_api("vm"):
@@ -723,3 +725,17 @@ def _ensure_safe_token(field_name: str, value: str) -> None:
 
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", value.lower())
+
+
+def _safe_iface_name(prefix: str, seed: str) -> str:
+    candidate = f"{prefix}{_slug(seed)}"
+    if len(candidate) <= IFACE_NAME_MAX_LEN:
+        return candidate
+
+    available = IFACE_NAME_MAX_LEN - len(prefix)
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+
+    if available <= 0:
+        return digest[:IFACE_NAME_MAX_LEN]
+
+    return f"{prefix}{digest[:available]}"

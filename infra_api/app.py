@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field
 PUBLIC_IPV4_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 ROUTING_TABLE_PATTERN = re.compile(r"\btable\s+(\S+)\b")
 ROUTING_DEVICE_PATTERN = re.compile(r"\bdev\s+(\S+)\b")
+IFACE_NAME_MAX_LEN = 15
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,24 @@ def _parse_map(raw: str) -> dict[str, str]:
         if key and value:
             mapping[key] = value
     return mapping
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9-]", "-", value.lower())
+
+
+def _safe_iface_name(prefix: str, seed: str) -> str:
+    candidate = f"{prefix}{_slug(seed)}"
+    if len(candidate) <= IFACE_NAME_MAX_LEN:
+        return candidate
+
+    available = IFACE_NAME_MAX_LEN - len(prefix)
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+
+    if available <= 0:
+        return digest[:IFACE_NAME_MAX_LEN]
+
+    return f"{prefix}{digest[:available]}"
 
 
 def _country_to_profile(country: str) -> str:
@@ -369,7 +389,7 @@ def restart_vm(payload: VmActionRequest) -> dict[str, str]:
 @APP.post("/v1/vms/delete", dependencies=[Depends(vm_auth)])
 def delete_vm(payload: VmDeleteRequest) -> dict[str, str]:
     script = _vm_script(SETTINGS.vm_delete_script, "delete_vm.sh")
-    tap_device = payload.tap_device or f"tap-{payload.vm_id.lower()}"
+    tap_device = payload.tap_device or _safe_iface_name("tap-", payload.vm_id)
     namespace = payload.namespace or f"netns-{payload.vm_id.lower()}"
     _run_command(["bash", script, payload.vm_id, tap_device, namespace], cwd=SETTINGS.microvm_home, check=False)
     return {"status": "ok"}
