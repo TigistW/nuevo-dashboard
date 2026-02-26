@@ -72,7 +72,7 @@ const NetworkManager: React.FC = () => {
   }, []);
 
   const runVpsRegistry = useCallback(async () => {
-    const country = window.prompt('Country for VPS registration (example: us):', 'us');
+    const country = window.prompt('Country/profile for VPS registration (examples: us, de, ca, es):', '');
     if (!country) {
       return;
     }

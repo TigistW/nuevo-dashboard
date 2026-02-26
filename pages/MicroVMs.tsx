@@ -17,9 +17,11 @@ type CreateVmForm = {
   template_id: string;
 };
 
+const COUNTRY_OPTIONS = ['us', 'de', 'ca', 'es', 'fr', 'uk', 'jp', 'sg'];
+
 const DEFAULT_FORM: CreateVmForm = {
   id: '',
-  country: 'us',
+  country: '',
   ram: '256MB',
   cpu: '1',
   template_id: 't-001',
@@ -152,12 +154,18 @@ const MicroVMs: React.FC = () => {
             className="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm outline-none"
           />
           <input
+            list="country-options"
             value={form.country}
             onChange={(event) => setForm((prev) => ({ ...prev, country: event.target.value }))}
             required
-            placeholder="country"
+            placeholder="country code (e.g. us, de, ca)"
             className="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm outline-none"
           />
+          <datalist id="country-options">
+            {COUNTRY_OPTIONS.map((country) => (
+              <option key={country} value={country} />
+            ))}
+          </datalist>
           <input
             value={form.ram}
             onChange={(event) => setForm((prev) => ({ ...prev, ram: event.target.value }))}

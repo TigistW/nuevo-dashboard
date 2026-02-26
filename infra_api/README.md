@@ -66,20 +66,32 @@ If you run the backend on the same Linux host, use `http://127.0.0.1:8090`.
 
 ## 5) OpenVPN multi-country behavior
 
-`PROXY_SELECTION_MODE` options:
+You can run this in two valid patterns.
 
-- `auto`: tries `proxy-<profile>`, falls back to `PROXY_SERVICE_NAME`.
-- `service`: requires a per-profile compose service.
-- `config`: single service mode, copies `configs/<profile>.ovpn` to `config.ovpn`.
+### A) Single-service pattern (simplest)
 
-Optional maps:
+- Keep only one compose service, for example `proxy-us`.
+- Put all country configs in `microvm-proxy/configs/` (`us.ovpn`, `de.ovpn`, `ca.ovpn`, ...).
+- Set:
+  - `PROXY_SELECTION_MODE=config`
+  - `PROXY_SERVICE_NAME=proxy-us`
+- On each rotate/register call, the API copies `configs/<profile>.ovpn` into `config.ovpn` and recreates that one service.
 
-- `COUNTRY_PROFILE_MAP` like `spain=es,germany=de`
-- `PROFILE_SERVICE_MAP` like `us=proxy-us,de=proxy-de`
+### B) Multi-service pattern (parallel by country)
+
+- Define dedicated compose services (`proxy-us`, `proxy-de`, `proxy-ca`, ...), each mounted to its own `configs/<profile>.ovpn`.
+- Set:
+  - `PROXY_SELECTION_MODE=auto` (or `service` if you want strict mode)
+  - `PROFILE_SERVICE_MAP=us=proxy-us,de=proxy-de,ca=proxy-ca`
+- In `auto` mode, API tries mapped service / `proxy-<profile>` first, then falls back to `PROXY_SERVICE_NAME`.
+
+### Country mapping
+
+- `COUNTRY_PROFILE_MAP` lets you map dashboard/backend country names to OVPN profile names.
+- Example: `COUNTRY_PROFILE_MAP=usa=us,spain=es,germany=de,canada=ca`
 
 ## 6) Health check
 
 ```bash
 curl http://127.0.0.1:8090/healthz
 ```
-
