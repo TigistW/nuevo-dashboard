@@ -101,6 +101,20 @@ export interface ApiDnsLeakResult {
   leaks: Array<{ vm_id: string; issue: string }>;
 }
 
+export interface ApiSchedulerTask {
+  id: string;
+  task_type: string;
+  vm_id?: string | null;
+  status: string;
+  progress: number;
+}
+
+export interface ApiJobEnqueueResponse {
+  message: string;
+  job_id: string;
+  status: string;
+}
+
 export function listMicroVms(): Promise<ApiMicroVm[]> {
   return requestJson<ApiMicroVm[]>("/api/v1/orchestrator/list", "GET");
 }
@@ -160,4 +174,12 @@ export function getSecurityAudit(): Promise<ApiSecurityAudit> {
 
 export function testIsolation(): Promise<{ status: string; details: string }> {
   return requestJson<{ status: string; details: string }>("/api/v1/security/test-isolation", "POST");
+}
+
+export function listSchedulerQueue(): Promise<ApiSchedulerTask[]> {
+  return requestJson<ApiSchedulerTask[]>("/api/v1/automation/scheduler/queue", "GET");
+}
+
+export function enqueueSchedulerJob(payload: ApiSchedulerTask): Promise<ApiJobEnqueueResponse> {
+  return requestJson<ApiJobEnqueueResponse>("/api/v1/automation/scheduler/jobs", "POST", payload);
 }
