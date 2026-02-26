@@ -141,27 +141,48 @@ function setStepState(
   return steps.map((step) => (step.id === stepId ? { ...step, ...updates } : step));
 }
 
-async function waitForVmReady(vmId: string, timeoutMs = 45_000): Promise<ApiMicroVm> {
+type OperationWaitOptions = {
+  timeoutMs?: number;
+  pollMs?: number;
+  onUpdate?: (operation: ApiOperationStatus) => void;
+};
+
+async function waitForVmReady(vmId: string, timeoutMs = 180_000, pollMs = 900): Promise<ApiMicroVm> {
   const startedAt = Date.now();
+  let lastVm: ApiMicroVm | null = null;
+
   while (Date.now() - startedAt < timeoutMs) {
     const vms = await listMicroVms();
     const vm = vms.find((row) => row.id === vmId);
     if (vm) {
+      lastVm = vm;
       const status = (vm.status || '').toLowerCase();
       const ip = (vm.public_ip || '').toLowerCase();
       if (status.includes('running') && ip && ip !== 'pending') {
         return vm;
       }
     }
-    await delay(900);
+    await delay(pollMs);
   }
-  throw new Error(`Timed out waiting for VM '${vmId}' to become Running.`);
+
+  const lastStatus = lastVm?.status || 'Unknown';
+  const lastIp = lastVm?.public_ip || 'Pending';
+  throw new Error(`Timed out waiting for VM '${vmId}' to become Running (status=${lastStatus}, ip=${lastIp}).`);
 }
 
-async function waitForOperationSuccess(operationId: string, timeoutMs = 45_000): Promise<ApiOperationStatus> {
+async function waitForOperationSuccess(
+  operationId: string,
+  options: OperationWaitOptions = {}
+): Promise<ApiOperationStatus> {
+  const { timeoutMs = 180_000, pollMs = 900, onUpdate } = options;
   const startedAt = Date.now();
+  let lastOperation: ApiOperationStatus | null = null;
+
   while (Date.now() - startedAt < timeoutMs) {
     const operation = await getOperation(operationId);
+    lastOperation = operation;
+    onUpdate?.(operation);
+
     const status = (operation.status || '').toLowerCase();
     if (status === 'succeeded') {
       return operation;
@@ -169,9 +190,12 @@ async function waitForOperationSuccess(operationId: string, timeoutMs = 45_000):
     if (status === 'failed') {
       throw new Error(operation.message || `Operation '${operationId}' failed.`);
     }
-    await delay(900);
+    await delay(pollMs);
   }
-  throw new Error(`Timed out waiting for operation '${operationId}'.`);
+
+  const lastStatus = lastOperation?.status || 'Unknown';
+  const lastMessage = lastOperation?.message ? `, message=${lastOperation.message}` : '';
+  throw new Error(`Timed out waiting for operation '${operationId}' (status=${lastStatus}${lastMessage}).`);
 }
 
 async function waitForSchedulerJob(jobId: string, timeoutMs = 120_000): Promise<void> {
@@ -370,7 +394,18 @@ const WorkflowBuilder: React.FC = () => {
             operationByStepId: { ...nextContext.operationByStepId, [step.id]: operation.id },
           };
           setContext(nextContext);
-          await waitForOperationSuccess(operation.id);
+          let lastProgressMessage = '';
+          await waitForOperationSuccess(operation.id, {
+            timeoutMs: 240_000,
+            onUpdate: (op) => {
+              const message = op.message || `Operation ${op.status}`;
+              if (message && message !== lastProgressMessage) {
+                lastProgressMessage = message;
+                nextSteps = setStepState(nextSteps, step.id, { message });
+                setSteps(nextSteps);
+              }
+            },
+          });
           const vm = await waitForVmReady(vmId);
           nextContext = { ...nextContext, publicIp: vm.public_ip };
           setContext(nextContext);
@@ -395,7 +430,18 @@ const WorkflowBuilder: React.FC = () => {
             operationByStepId: { ...nextContext.operationByStepId, [step.id]: operation.id },
           };
           setContext(nextContext);
-          await waitForOperationSuccess(operation.id);
+          let lastProgressMessage = '';
+          await waitForOperationSuccess(operation.id, {
+            timeoutMs: 120_000,
+            onUpdate: (op) => {
+              const message = op.message || `Operation ${op.status}`;
+              if (message && message !== lastProgressMessage) {
+                lastProgressMessage = message;
+                nextSteps = setStepState(nextSteps, step.id, { message });
+                setSteps(nextSteps);
+              }
+            },
+          });
 
           nextSteps = setStepState(nextSteps, step.id, { status: 'succeeded', message: 'Fingerprint synced.' });
           setSteps(nextSteps);
