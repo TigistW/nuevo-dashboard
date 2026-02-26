@@ -57,6 +57,8 @@ class Task(BaseModel):
     vm_id: str | None = None
     status: str
     progress: int = Field(ge=0, le=100)
+    retry_count: int = Field(default=0, ge=0)
+    error_message: str | None = None
 
 
 class Guardrails(BaseModel):

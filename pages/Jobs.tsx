@@ -149,6 +149,14 @@ const Jobs: React.FC = () => {
                     </td>
                     <td className="px-8 py-6">
                       <div className="text-[10px] text-slate-400 mt-2 font-bold uppercase tracking-tighter">{job.status}</div>
+                      {(job.retry_count || 0) > 0 ? (
+                        <div className="text-[10px] text-amber-400 mt-1 font-mono">Retry: {job.retry_count}</div>
+                      ) : null}
+                      {job.error_message ? (
+                        <div className="text-[10px] text-rose-400 mt-1 max-w-[280px] truncate" title={job.error_message}>
+                          {job.error_message}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="px-8 py-6">
                       <div className="flex items-center gap-4">

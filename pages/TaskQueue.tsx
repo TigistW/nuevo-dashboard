@@ -150,6 +150,12 @@ const TaskQueue: React.FC = () => {
                 </span>
               </div>
               <p className="text-slate-400 text-sm">{task.task_type}</p>
+              {(task.retry_count || 0) > 0 ? <p className="text-amber-400 text-xs">Retry count: {task.retry_count}</p> : null}
+              {task.error_message ? (
+                <p className="text-rose-400 text-xs truncate" title={task.error_message}>
+                  {task.error_message}
+                </p>
+              ) : null}
             </div>
 
             <div className="w-full md:w-64 space-y-2">

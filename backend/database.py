@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from .config import settings
@@ -37,3 +37,24 @@ def init_db() -> None:
     from . import db_models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _run_sqlite_compat_migrations()
+
+
+def _run_sqlite_compat_migrations() -> None:
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+
+    with engine.begin() as conn:
+        table_exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduler_jobs'")
+        ).first()
+        if not table_exists:
+            return
+
+        columns = conn.execute(text("PRAGMA table_info('scheduler_jobs')")).mappings().all()
+        existing_names = {str(column["name"]) for column in columns}
+
+        if "retry_count" not in existing_names:
+            conn.execute(text("ALTER TABLE scheduler_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"))
+        if "error_message" not in existing_names:
+            conn.execute(text("ALTER TABLE scheduler_jobs ADD COLUMN error_message TEXT"))

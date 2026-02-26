@@ -107,6 +107,8 @@ export interface ApiSchedulerTask {
   vm_id?: string | null;
   status: string;
   progress: number;
+  retry_count?: number;
+  error_message?: string | null;
 }
 
 export interface ApiJobEnqueueResponse {
