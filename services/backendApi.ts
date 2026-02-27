@@ -122,6 +122,7 @@ export interface ApiAutoscaleRequest {
   max_vms: number;
   jobs_per_vm: number;
   country: string;
+  country_min_pools?: Record<string, number>;
   ram: string;
   cpu: string;
   template_id: string;

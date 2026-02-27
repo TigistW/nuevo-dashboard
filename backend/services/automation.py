@@ -10,6 +10,7 @@ from ..database import SessionLocal
 from ..models import AutoscaleDecision, AutoscaleRequest, HealingRule, JobEnqueueResponse, MicroVMCreate, Task
 from ..repositories import StorageRepository
 from .orchestrator import OrchestratorService
+from .utils import normalize_country
 
 RUNNABLE_VM_STATES = {"running"}
 TERMINAL_VM_STATES = {"deleted", "error", "stopped"}
@@ -150,23 +151,59 @@ class AutomationService:
                 ),
             )
 
+        normalized_country = normalize_country(payload.country)
+        country_min_pools: dict[str, int] = {}
+        for raw_country, raw_minimum in payload.country_min_pools.items():
+            minimum = int(raw_minimum)
+            if minimum < 0:
+                raise HTTPException(status_code=400, detail="country_min_pools values must be zero or greater.")
+            country_name = normalize_country(raw_country)
+            current = country_min_pools.get(country_name, 0)
+            country_min_pools[country_name] = max(current, minimum)
+
+        country_min_pools[normalized_country] = max(country_min_pools.get(normalized_country, 0), payload.min_vms)
+        pooled_minimum = sum(country_min_pools.values())
+        if pooled_minimum > effective_max_vms:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Autoscale country pools exceed limits: "
+                    f"sum(country_min_pools)={pooled_minimum}, effective_max_vms={effective_max_vms}."
+                ),
+            )
+
+        pool_description = ", ".join(
+            f"{country}:{country_min_pools[country]}" for country in sorted(country_min_pools.keys())
+        )
         running_vms = [vm for vm in self.repo.list_vms(include_deleted=False) if vm.status == "running"]
+        running_by_country: dict[str, int] = {}
+        for vm in running_vms:
+            vm_country = normalize_country(vm.country)
+            running_by_country[vm_country] = running_by_country.get(vm_country, 0) + 1
+
         jobs = self.repo.list_scheduler_jobs()
         active_statuses = {"Queued", "Running", "Retrying"}
         active_jobs = [job for job in jobs if job.status in active_statuses]
         queued_jobs = [job for job in jobs if job.status == "Queued"]
 
         desired_from_jobs = math.ceil(len(active_jobs) / payload.jobs_per_vm) if active_jobs else 0
-        desired_vms = max(payload.min_vms, desired_from_jobs)
+        desired_vms = max(desired_from_jobs, pooled_minimum)
         desired_vms = min(desired_vms, effective_max_vms)
 
         orchestrator = OrchestratorService(self.repo)
 
         if len(running_vms) < desired_vms:
+            deficits = [
+                (country, minimum - running_by_country.get(country, 0))
+                for country, minimum in country_min_pools.items()
+                if running_by_country.get(country, 0) < minimum
+            ]
+            deficits.sort(key=lambda item: (-item[1], running_by_country.get(item[0], 0), item[0]))
+            target_country = deficits[0][0] if deficits else normalized_country
             auto_vm_id = f"auto-{int(time.time() * 1000)}-{random.randint(100, 999)}"
             vm_payload = MicroVMCreate(
                 id=auto_vm_id,
-                country=payload.country,
+                country=target_country,
                 ram=payload.ram,
                 cpu=payload.cpu,
                 template_id=payload.template_id,
@@ -180,7 +217,7 @@ class AutomationService:
             )
             reason = (
                 f"Scale up: running={len(running_vms)} below desired={desired_vms} "
-                f"(active_jobs={len(active_jobs)}, jobs_per_vm={payload.jobs_per_vm})."
+                f"(active_jobs={len(active_jobs)}, jobs_per_vm={payload.jobs_per_vm}, target_country={target_country}, pools={pool_description})."
             )
             self.repo.add_log("Automation", "INFO", "Autoscaler scale-up triggered.", reason)
             return AutoscaleDecision(
@@ -198,12 +235,21 @@ class AutomationService:
         if len(running_vms) > desired_vms:
             busy_vm_ids = {job.vm_id for job in active_jobs if job.vm_id}
             idle_candidates = [vm for vm in running_vms if vm.id not in busy_vm_ids]
-            if idle_candidates:
-                target_vm = sorted(idle_candidates, key=lambda vm: vm.created_at, reverse=True)[0]
+            eligible_idle_candidates = []
+            for vm in idle_candidates:
+                vm_country = normalize_country(vm.country)
+                protected_floor = country_min_pools.get(vm_country, 0)
+                remaining = running_by_country.get(vm_country, 0) - 1
+                if remaining < protected_floor:
+                    continue
+                eligible_idle_candidates.append(vm)
+
+            if eligible_idle_candidates:
+                target_vm = sorted(eligible_idle_candidates, key=lambda vm: vm.created_at, reverse=True)[0]
                 operation = orchestrator.stop_vm(target_vm.id, background_tasks)
                 reason = (
                     f"Scale down: running={len(running_vms)} above desired={desired_vms}; "
-                    f"selected idle VM '{target_vm.id}'."
+                    f"selected idle VM '{target_vm.id}' (pools={pool_description})."
                 )
                 self.repo.add_log("Automation", "INFO", "Autoscaler scale-down triggered.", reason)
                 return AutoscaleDecision(
@@ -216,6 +262,21 @@ class AutomationService:
                     queued_jobs=len(queued_jobs),
                     operation_id=operation.id,
                     affected_vm_id=target_vm.id,
+                )
+
+            if idle_candidates:
+                reason = (
+                    f"No scale-down candidate: running={len(running_vms)} desired={desired_vms}; "
+                    f"country pools prevent removal (pools={pool_description})."
+                )
+                return AutoscaleDecision(
+                    status="NoAction",
+                    action="none",
+                    reason=reason,
+                    running_vms=len(running_vms),
+                    desired_vms=desired_vms,
+                    active_jobs=len(active_jobs),
+                    queued_jobs=len(queued_jobs),
                 )
 
             reason = (
@@ -234,7 +295,7 @@ class AutomationService:
 
         reason = (
             f"Stable: running={len(running_vms)} matches desired={desired_vms} "
-            f"(active_jobs={len(active_jobs)})."
+            f"(active_jobs={len(active_jobs)}, pools={pool_description})."
         )
         return AutoscaleDecision(
             status="NoAction",

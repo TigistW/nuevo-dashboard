@@ -48,3 +48,4 @@ infra_api/.env
 *.sqlite
 *.sqlite3
 backend/colab_farm.db
+backend/tests/.tmp/

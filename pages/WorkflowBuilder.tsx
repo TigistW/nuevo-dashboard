@@ -65,6 +65,7 @@ type AutoscaleConfig = {
   jobsPerVm: number;
   intervalSec: number;
   country: string;
+  countryPoolsText: string;
   ram: string;
   cpu: string;
   templateId: string;
@@ -82,6 +83,9 @@ type WorkflowSession = {
 
 const STORAGE_KEY = 'colab_farm_workflow_session_v1';
 const COUNTRY_OPTIONS = ['us', 'de', 'ca', 'es', 'fr', 'uk', 'jp', 'sg'];
+const RAM_PATTERN = /^\s*(\d+)\s*(mb|m|gb|g)?\s*$/i;
+const CPU_PATTERN = /^\s*(\d+)\s*$/;
+const MAX_RECOMMENDED_VMS = 50;
 
 const DEFAULT_CONFIG: WorkflowRunConfig = {
   vmId: '',
@@ -99,6 +103,7 @@ const DEFAULT_AUTOSCALE_CONFIG: AutoscaleConfig = {
   jobsPerVm: 2,
   intervalSec: 25,
   country: 'us',
+  countryPoolsText: '',
   ram: '256MB',
   cpu: '1',
   templateId: 't-001',
@@ -127,6 +132,73 @@ function generateSafeVmId(): string {
   const randomPart = Math.random().toString(36).slice(2, 6);
   const suffix = `${timePart}${randomPart}`.slice(-8);
   return `vm-${suffix}`;
+}
+
+function parseRamToMb(value: string): number | null {
+  const match = RAM_PATTERN.exec(value || '');
+  if (!match) {
+    return null;
+  }
+  const amount = Number(match[1]);
+  const unit = (match[2] || 'mb').toLowerCase();
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return null;
+  }
+  return unit === 'gb' || unit === 'g' ? amount * 1024 : amount;
+}
+
+function parseCpuCores(value: string): number | null {
+  const match = CPU_PATTERN.exec(value || '');
+  if (!match) {
+    return null;
+  }
+  const cores = Number(match[1]);
+  if (!Number.isFinite(cores) || cores <= 0) {
+    return null;
+  }
+  return cores;
+}
+
+function parseCountryMinPools(raw: string): { pools: Record<string, number>; errors: string[] } {
+  const pools: Record<string, number> = {};
+  const errors: string[] = [];
+  const text = (raw || '').trim();
+  if (!text) {
+    return { pools, errors };
+  }
+
+  const entries = text
+    .split(/[\n,;]+/)
+    .map((chunk) => chunk.trim())
+    .filter(Boolean);
+
+  for (const entry of entries) {
+    const parts = entry.split(':').map((part) => part.trim());
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      errors.push(`Invalid country pool '${entry}'. Use format country:min.`);
+      continue;
+    }
+
+    const country = parts[0].toLowerCase();
+    if (!/^[a-z-]{2,64}$/i.test(country)) {
+      errors.push(`Invalid country key '${parts[0]}' in country pools.`);
+      continue;
+    }
+
+    if (!/^\d+$/.test(parts[1])) {
+      errors.push(`Invalid minimum '${parts[1]}' for country '${country}'.`);
+      continue;
+    }
+
+    const minimum = Number(parts[1]);
+    if (minimum < 0 || minimum > 200) {
+      errors.push(`Country pool for '${country}' must be between 0 and 200.`);
+      continue;
+    }
+    pools[country] = minimum;
+  }
+
+  return { pools, errors };
 }
 
 function normalizeStepStatus(value: WorkflowStep['status']): StepStatus {
@@ -298,6 +370,84 @@ const WorkflowBuilder: React.FC = () => {
     setSavedSession(loadSession());
   }, []);
 
+  const workflowValidation = useMemo(() => {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    const country = (config.country || '').trim();
+    const templateId = (config.templateId || '').trim();
+    const ramMb = parseRamToMb(config.ram);
+    const cpuCores = parseCpuCores(config.cpu);
+
+    if (!country) {
+      errors.push('Workflow country is required.');
+    }
+    if (!templateId) {
+      errors.push('Template is required.');
+    }
+    if (ramMb === null) {
+      errors.push("RAM must use formats like '256', '256MB', or '2GB'.");
+    } else {
+      if (ramMb < 128) {
+        warnings.push('RAM below 128MB can make VM startup unstable.');
+      }
+      if (ramMb > 4096) {
+        warnings.push('RAM above 4096MB may hit host reserve guardrails.');
+      }
+    }
+    if (cpuCores === null) {
+      errors.push("CPU must be a positive integer like '1' or '2'.");
+    } else if (cpuCores > 2) {
+      warnings.push('CPU above 2 may exceed backend per-VM guardrails.');
+    }
+
+    return { errors, warnings };
+  }, [config.country, config.cpu, config.ram, config.templateId]);
+
+  const autoscaleValidation = useMemo(() => {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    const selectedCountry = (autoScaleConfig.country || '').trim().toLowerCase();
+    const { pools, errors: poolErrors } = parseCountryMinPools(autoScaleConfig.countryPoolsText);
+
+    if (!selectedCountry) {
+      errors.push('Autoscaler country is required.');
+    }
+    errors.push(...poolErrors);
+
+    if (autoScaleConfig.minVms > autoScaleConfig.maxVms) {
+      errors.push('Autoscaler Min VMs cannot be greater than Max VMs.');
+    }
+    if (autoScaleConfig.jobsPerVm <= 0) {
+      errors.push('Autoscaler Jobs/VM must be at least 1.');
+    }
+
+    const selectedPool = Math.max(pools[selectedCountry] || 0, autoScaleConfig.minVms);
+    const poolTotal = Object.entries(pools).reduce((sum, [country, value]) => {
+      if (country === selectedCountry) {
+        return sum + selectedPool;
+      }
+      return sum + value;
+    }, selectedCountry && !(selectedCountry in pools) ? selectedPool : 0);
+
+    if (poolTotal > autoScaleConfig.maxVms) {
+      errors.push(`Country pool minimums total ${poolTotal}, which exceeds Max VMs (${autoScaleConfig.maxVms}).`);
+    }
+
+    if (autoScaleConfig.jobsPerVm === 1) {
+      warnings.push('Jobs/VM = 1 gives best isolation but highest VM cost.');
+    } else if (autoScaleConfig.jobsPerVm >= 8) {
+      warnings.push('Jobs/VM >= 8 can overload VMs and increase timeouts.');
+    }
+
+    if (autoScaleConfig.maxVms > MAX_RECOMMENDED_VMS) {
+      warnings.push(
+        `Max VMs above ${MAX_RECOMMENDED_VMS} may be capped by backend guardrails unless limits are raised.`
+      );
+    }
+
+    return { errors, warnings, countryMinPools: pools };
+  }, [autoScaleConfig.country, autoScaleConfig.countryPoolsText, autoScaleConfig.jobsPerVm, autoScaleConfig.maxVms, autoScaleConfig.minVms]);
+
   const addStep = useCallback((step: WorkflowStep) => {
     setSteps((current) => [
       ...current,
@@ -344,6 +494,12 @@ const WorkflowBuilder: React.FC = () => {
 
   const runAutoscale = useCallback(
     async (mode: 'manual' | 'auto' = 'manual') => {
+      if (autoscaleValidation.errors.length > 0) {
+        if (mode === 'manual' || autoScaleEnabled) {
+          setErrorText(`Autoscale config invalid: ${autoscaleValidation.errors[0]}`);
+        }
+        return;
+      }
       if (autoscaleInFlightRef.current) {
         return;
       }
@@ -362,6 +518,7 @@ const WorkflowBuilder: React.FC = () => {
           max_vms: autoScaleConfig.maxVms,
           jobs_per_vm: autoScaleConfig.jobsPerVm,
           country: autoScaleConfig.country,
+          country_min_pools: autoscaleValidation.countryMinPools,
           ram: autoScaleConfig.ram,
           cpu: autoScaleConfig.cpu,
           template_id: autoScaleConfig.templateId,
@@ -384,11 +541,15 @@ const WorkflowBuilder: React.FC = () => {
         setIsAutoscaleBusy(false);
       }
     },
-    [autoScaleConfig, autoScaleEnabled, isExecuting]
+    [autoScaleConfig, autoScaleEnabled, autoscaleValidation, isExecuting]
   );
 
   useEffect(() => {
     if (!autoScaleEnabled) {
+      return;
+    }
+    if (autoscaleValidation.errors.length > 0) {
+      setErrorText(`Autoscale config invalid: ${autoscaleValidation.errors[0]}`);
       return;
     }
     const intervalSeconds = Math.max(10, autoScaleConfig.intervalSec || 10);
@@ -397,10 +558,14 @@ const WorkflowBuilder: React.FC = () => {
       void runAutoscale('auto');
     }, intervalSeconds * 1000);
     return () => window.clearInterval(timer);
-  }, [autoScaleEnabled, autoScaleConfig.intervalSec, runAutoscale]);
+  }, [autoScaleConfig.intervalSec, autoScaleEnabled, autoscaleValidation.errors, runAutoscale]);
 
   const runWorkflow = useCallback(async () => {
     if (isExecuting) {
+      return;
+    }
+    if (workflowValidation.errors.length > 0) {
+      setErrorText(`Workflow config invalid: ${workflowValidation.errors[0]}`);
       return;
     }
 
@@ -660,7 +825,7 @@ const WorkflowBuilder: React.FC = () => {
     } finally {
       setIsExecuting(false);
     }
-  }, [config, context, isExecuting, steps]);
+  }, [config, context, isExecuting, steps, workflowValidation.errors]);
 
   const currentVmLabel = context.vmId
     ? `${context.vmId}${context.publicIp ? ` @ ${context.publicIp}` : ''}`
@@ -676,15 +841,25 @@ const WorkflowBuilder: React.FC = () => {
         <div className="flex gap-3 items-center">
           <button
             onClick={() => void runAutoscale('manual')}
-            disabled={isExecuting || isAutoscaleBusy}
+            disabled={isExecuting || isAutoscaleBusy || autoscaleValidation.errors.length > 0}
             className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded-xl text-xs font-bold transition-all border border-slate-700"
             title="Evaluate demand and scale VMs once"
           >
             {isAutoscaleBusy ? 'Autoscaling...' : 'Run Autoscale'}
           </button>
           <button
-            onClick={() => setAutoScaleEnabled((prev) => !prev)}
-            disabled={isExecuting}
+            onClick={() => {
+              if (autoScaleEnabled) {
+                setAutoScaleEnabled(false);
+                return;
+              }
+              if (autoscaleValidation.errors.length > 0) {
+                setErrorText(`Autoscale config invalid: ${autoscaleValidation.errors[0]}`);
+                return;
+              }
+              setAutoScaleEnabled(true);
+            }}
+            disabled={isExecuting || (!autoScaleEnabled && autoscaleValidation.errors.length > 0)}
             className={`px-4 py-2 disabled:opacity-50 rounded-xl text-xs font-bold transition-all border ${
               autoScaleEnabled
                 ? 'bg-emerald-600/20 border-emerald-500/30 text-emerald-300'
@@ -715,7 +890,7 @@ const WorkflowBuilder: React.FC = () => {
           ) : null}
           <button
             onClick={() => void runWorkflow()}
-            disabled={isExecuting || steps.length === 0}
+            disabled={isExecuting || steps.length === 0 || workflowValidation.errors.length > 0}
             className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl font-bold text-xs uppercase shadow-lg shadow-emerald-600/20 transition-all"
           >
             {isExecuting ? 'Executing...' : t('executeWorkflow')}
@@ -930,7 +1105,52 @@ const WorkflowBuilder: React.FC = () => {
                     </select>
                   </div>
                 </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Country Pools</label>
+                  <input
+                    value={autoScaleConfig.countryPoolsText}
+                    onChange={(event) =>
+                      setAutoScaleConfig((prev) => ({
+                        ...prev,
+                        countryPoolsText: event.target.value,
+                      }))
+                    }
+                    placeholder="us:2,de:1"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm outline-none"
+                    disabled={isExecuting}
+                  />
+                  <p className="text-[10px] font-mono text-slate-500">Optional. Format: country:min, country:min</p>
+                </div>
+                {autoscaleValidation.errors.length > 0 ? (
+                  <div className="rounded-xl border border-rose-500/30 bg-rose-900/20 px-3 py-2 text-[11px] text-rose-300">
+                    {autoscaleValidation.errors.map((item, index) => (
+                      <p key={`autoscale-error-${index}`}>{item}</p>
+                    ))}
+                  </div>
+                ) : null}
+                {autoscaleValidation.warnings.length > 0 ? (
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-900/20 px-3 py-2 text-[11px] text-amber-200">
+                    {autoscaleValidation.warnings.map((item, index) => (
+                      <p key={`autoscale-warning-${index}`}>{item}</p>
+                    ))}
+                  </div>
+                ) : null}
               </div>
+
+              {workflowValidation.errors.length > 0 ? (
+                <div className="rounded-xl border border-rose-500/30 bg-rose-900/20 px-3 py-2 text-[11px] text-rose-300">
+                  {workflowValidation.errors.map((item, index) => (
+                    <p key={`workflow-error-${index}`}>{item}</p>
+                  ))}
+                </div>
+              ) : null}
+              {workflowValidation.warnings.length > 0 ? (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-900/20 px-3 py-2 text-[11px] text-amber-200">
+                  {workflowValidation.warnings.map((item, index) => (
+                    <p key={`workflow-warning-${index}`}>{item}</p>
+                  ))}
+                </div>
+              ) : null}
 
               <div className="pt-2 text-[11px] font-mono text-slate-400">
                 Active VM: <span className="text-slate-200">{currentVmLabel}</span>

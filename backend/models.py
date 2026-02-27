@@ -122,6 +122,7 @@ class AutoscaleRequest(BaseModel):
     max_vms: int = Field(default=6, gt=0, le=200)
     jobs_per_vm: int = Field(default=2, gt=0, le=32)
     country: str = Field(default="us", min_length=1, max_length=64)
+    country_min_pools: dict[str, int] = Field(default_factory=dict)
     ram: str = Field(default="256MB", min_length=1, max_length=32)
     cpu: str = Field(default="1", min_length=1, max_length=32)
     template_id: str = Field(default="t-001", min_length=1, max_length=64)
