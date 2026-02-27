@@ -358,6 +358,7 @@ class InfrastructureAdapter:
         _ensure_safe_token("vm_id", vm_id)
         _ensure_safe_token("tunnel_id", tunnel_id)
         fallback_runs: list[CommandRun] = []
+        normalized_country = (country or "").strip().lower()
 
         if self._should_try_api("proxy"):
             payload = {"vm_id": vm_id, "tunnel_id": tunnel_id, "country": country}
@@ -368,19 +369,36 @@ class InfrastructureAdapter:
                     payload,
                     method="POST",
                 )
-                public_ip = str(data.get("public_ip") or generate_public_ip(f"{vm_id}:{tunnel_id}"))
-                latency_ms = self._as_int(
-                    data.get("latency_ms"),
-                    max(20, estimate_latency_ms(country) + random.randint(-15, 20)),
-                )
-                asn = str(data.get("asn") or f"AS{random.randint(10000, 99999)}")
-                return TunnelRotationResult(
-                    public_ip=public_ip,
-                    latency_ms=latency_ms,
-                    asn=asn,
+                return self._rotation_from_api_payload(
+                    data=data,
+                    vm_id=vm_id,
+                    tunnel_id=tunnel_id,
+                    country=country,
                     command_runs=[api_run],
                 )
             except Exception as exc:
+                if normalized_country not in {"us", "usa"} and self._is_proxy_country_config_error(exc):
+                    fallback_country = "us"
+                    fallback_payload = {"vm_id": vm_id, "tunnel_id": tunnel_id, "country": fallback_country}
+                    try:
+                        data, fallback_run = self._api_call(
+                            "proxy",
+                            settings.proxy_api_rotate_endpoint,
+                            fallback_payload,
+                            method="POST",
+                        )
+                        return self._rotation_from_api_payload(
+                            data=data,
+                            vm_id=vm_id,
+                            tunnel_id=tunnel_id,
+                            country=fallback_country,
+                            command_runs=[
+                                self._api_failure_run("proxy", settings.proxy_api_rotate_endpoint, exc),
+                                fallback_run,
+                            ],
+                        )
+                    except Exception:
+                        pass
                 if not self._allow_shell_fallback():
                     raise
                 fallback_runs.append(self._api_failure_run("proxy", settings.proxy_api_rotate_endpoint, exc))
@@ -406,6 +424,35 @@ class InfrastructureAdapter:
             public_ip=discovered_ip or generate_public_ip(f"{vm_id}:{tunnel_id}"),
             latency_ms=max(20, estimate_latency_ms(country) + random.randint(-15, 20)),
             asn=f"AS{random.randint(10000, 99999)}",
+            command_runs=command_runs,
+        )
+
+    @staticmethod
+    def _is_proxy_country_config_error(exc: Exception) -> bool:
+        detail = str(exc).lower()
+        return "http 400" in detail and (
+            "openvpn profile not found" in detail or "no compose service found for profile" in detail
+        )
+
+    def _rotation_from_api_payload(
+        self,
+        *,
+        data: dict[str, Any],
+        vm_id: str,
+        tunnel_id: str,
+        country: str,
+        command_runs: list[CommandRun],
+    ) -> TunnelRotationResult:
+        public_ip = str(data.get("public_ip") or generate_public_ip(f"{vm_id}:{tunnel_id}"))
+        latency_ms = self._as_int(
+            data.get("latency_ms"),
+            max(20, estimate_latency_ms(country) + random.randint(-15, 20)),
+        )
+        asn = str(data.get("asn") or f"AS{random.randint(10000, 99999)}")
+        return TunnelRotationResult(
+            public_ip=public_ip,
+            latency_ms=latency_ms,
+            asn=asn,
             command_runs=command_runs,
         )
 

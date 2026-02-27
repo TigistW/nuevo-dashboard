@@ -167,3 +167,4 @@ class CentralizedLogEntry(BaseModel):
     source: str
     level: str
     msg: str
+    details: str | None = None

@@ -4,6 +4,7 @@ from ..config import settings
 from ..models import SecurityAuditResponse
 from ..repositories import StorageRepository
 from .infra_adapter import InfrastructureAdapter, summarize_command_runs
+from .workflow_logging import log_workflow_step
 
 
 class SecurityService:
@@ -11,6 +12,12 @@ class SecurityService:
         self.repo = repo
 
     def get_security_audit(self) -> SecurityAuditResponse:
+        log_workflow_step(
+            self.repo,
+            step="verification",
+            phase="audit",
+            message="Security audit requested.",
+        )
         running_vms = [vm for vm in self.repo.list_vms(include_deleted=False) if vm.status == "running"]
         tunnels = [tunnel for tunnel in self.repo.list_tunnels() if tunnel.status == "Connected"]
         runtime_snapshot = InfrastructureAdapter().collect_security_snapshot()
@@ -33,13 +40,30 @@ class SecurityService:
         else:
             nftables_status = runtime_snapshot.nftables_status
 
-        return SecurityAuditResponse(
+        response = SecurityAuditResponse(
             namespaces=namespaces,
             nftables_status=nftables_status,
             routing_tables=routing_tables,
         )
+        log_workflow_step(
+            self.repo,
+            step="verification",
+            phase="audit",
+            message="Security audit completed.",
+            details=(
+                f"running_vms={len(running_vms)}, connected_tunnels={len(tunnels)}, "
+                f"nftables_status={response.nftables_status}"
+            ),
+        )
+        return response
 
     def test_isolation(self) -> dict:
+        log_workflow_step(
+            self.repo,
+            step="verification",
+            phase="isolation",
+            message="Isolation test started.",
+        )
         running_vms = [vm for vm in self.repo.list_vms(include_deleted=False) if vm.status == "running"]
         tunnels = self.repo.list_tunnels()
         tunnel_map = {tunnel.id: tunnel for tunnel in tunnels}
@@ -68,12 +92,26 @@ class SecurityService:
             if command_summary:
                 details = f"{details} | commands: {command_summary}"
             self.repo.add_log("Security", "WARNING", "Isolation test found potential leaks.", details)
+            log_workflow_step(
+                self.repo,
+                step="verification",
+                phase="isolation",
+                message="Isolation test failed.",
+                details=details,
+                level="WARNING",
+            )
             return {"status": "Failed", "details": details}
 
         command_summary = summarize_command_runs(runtime_snapshot.command_runs)
         if command_summary:
             self.repo.add_log("Security", "DEBUG", "Isolation check commands executed.", command_summary)
         self.repo.add_log("Security", "INFO", "Isolation test passed.")
+        log_workflow_step(
+            self.repo,
+            step="verification",
+            phase="isolation",
+            message="Isolation test passed.",
+        )
         return {"status": "Passed", "details": "No leaks detected"}
 
     @staticmethod

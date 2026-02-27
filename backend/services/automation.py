@@ -11,6 +11,7 @@ from ..models import AutoscaleDecision, AutoscaleRequest, HealingRule, JobEnqueu
 from ..repositories import StorageRepository
 from .orchestrator import OrchestratorService
 from .utils import normalize_country
+from .workflow_logging import log_workflow_step
 
 RUNNABLE_VM_STATES = {"running"}
 TERMINAL_VM_STATES = {"deleted", "error", "stopped"}
@@ -42,7 +43,21 @@ class AutomationService:
         return [HealingRule(id=rule.id, trigger=rule.trigger, action=rule.action, enabled=rule.enabled) for rule in rules]
 
     def create_job(self, task: Task, background_tasks: BackgroundTasks) -> JobEnqueueResponse:
+        log_workflow_step(
+            self.repo,
+            step="automation",
+            phase="request",
+            message=f"Automation job request received for '{task.id}'.",
+            details=f"task_type={task.task_type}, requested_vm={task.vm_id or 'AUTO'}",
+        )
         if self.repo.get_scheduler_job(task.id) is not None:
+            log_workflow_step(
+                self.repo,
+                step="automation",
+                phase="rejected",
+                message=f"Job '{task.id}' already exists.",
+                level="WARNING",
+            )
             raise HTTPException(status_code=409, detail=f"Job '{task.id}' already exists.")
 
         assigned_vm_id = self._resolve_job_vm(task.vm_id)
@@ -63,6 +78,13 @@ class AutomationService:
             message=f"Job '{job.id}' queued for {target}.",
         )
         self.repo.add_log("Automation", "INFO", f"Job {job.id} queued (target={target}).")
+        log_workflow_step(
+            self.repo,
+            step="automation",
+            phase="queued",
+            message=f"Automation job '{job.id}' queued.",
+            details=f"target_vm={target}, operation_id={operation.id}",
+        )
         background_tasks.add_task(_run_job_task, job.id, operation.id)
         return JobEnqueueResponse(message="Job queued", job_id=job.id, status=job.status)
 
@@ -136,6 +158,16 @@ class AutomationService:
         payload: AutoscaleRequest,
         background_tasks: BackgroundTasks,
     ) -> AutoscaleDecision:
+        log_workflow_step(
+            self.repo,
+            step="automation",
+            phase="autoscale",
+            message="Autoscale evaluation started.",
+            details=(
+                f"min_vms={payload.min_vms}, max_vms={payload.max_vms}, jobs_per_vm={payload.jobs_per_vm}, "
+                f"country={payload.country}"
+            ),
+        )
         if payload.max_vms < payload.min_vms:
             raise HTTPException(status_code=400, detail="max_vms must be greater than or equal to min_vms.")
 
@@ -220,6 +252,13 @@ class AutomationService:
                 f"(active_jobs={len(active_jobs)}, jobs_per_vm={payload.jobs_per_vm}, target_country={target_country}, pools={pool_description})."
             )
             self.repo.add_log("Automation", "INFO", "Autoscaler scale-up triggered.", reason)
+            log_workflow_step(
+                self.repo,
+                step="automation",
+                phase="autoscale",
+                message="Autoscaler decided to scale up.",
+                details=reason,
+            )
             return AutoscaleDecision(
                 status="Adjusted",
                 action="scale_up",
@@ -252,6 +291,13 @@ class AutomationService:
                     f"selected idle VM '{target_vm.id}' (pools={pool_description})."
                 )
                 self.repo.add_log("Automation", "INFO", "Autoscaler scale-down triggered.", reason)
+                log_workflow_step(
+                    self.repo,
+                    step="automation",
+                    phase="autoscale",
+                    message="Autoscaler decided to scale down.",
+                    details=reason,
+                )
                 return AutoscaleDecision(
                     status="Adjusted",
                     action="scale_down",
@@ -312,6 +358,13 @@ def _run_job_task(job_id: str, operation_id: str) -> None:
     db = SessionLocal()
     repo = StorageRepository(db)
     try:
+        log_workflow_step(
+            repo,
+            step="automation",
+            phase="running",
+            message=f"Automation job runner started for '{job_id}'.",
+            details=f"operation_id={operation_id}",
+        )
         job = repo.get_scheduler_job(job_id)
         if job is None:
             raise RuntimeError(f"Job '{job_id}' does not exist.")
@@ -351,6 +404,17 @@ def _run_job_task(job_id: str, operation_id: str) -> None:
             repo.add_log("Automation", "ERROR", f"Job {job_id} failed.", str(exc))
         except Exception:
             pass
+        try:
+            log_workflow_step(
+                repo,
+                step="automation",
+                phase="failed",
+                message=f"Automation job '{job_id}' failed.",
+                details=str(exc),
+                level="ERROR",
+            )
+        except Exception:
+            pass
     finally:
         db.close()
 
@@ -366,6 +430,13 @@ def _run_job_with_retries(repo: StorageRepository, job_id: str, operation_id: st
     total_attempts = MAX_JOB_RETRIES + 1
 
     for attempt in range(1, total_attempts + 1):
+        log_workflow_step(
+            repo,
+            step="automation",
+            phase="attempt",
+            message=f"Running job '{job_id}' attempt {attempt}/{total_attempts}.",
+            details=f"operation_id={operation_id}",
+        )
         job = repo.get_scheduler_job(job_id)
         if job is None:
             raise RuntimeError(f"Job '{job_id}' does not exist.")
@@ -394,6 +465,13 @@ def _run_job_with_retries(repo: StorageRepository, job_id: str, operation_id: st
                 repo.update_scheduler_job(completed, status="Completed", progress=100, error_message=None)
             repo.update_operation_status(operation_id, "succeeded", f"Job '{job_id}' completed.")
             repo.add_log("Automation", "INFO", f"Job {job_id} completed successfully.")
+            log_workflow_step(
+                repo,
+                step="automation",
+                phase="success",
+                message=f"Automation job '{job_id}' completed.",
+                details=f"attempt={attempt}",
+            )
             return
         except JobRetryableError as exc:
             current = repo.get_scheduler_job(job_id)
@@ -451,6 +529,13 @@ def _run_single_job_attempt(repo: StorageRepository, job_id: str, operation_id: 
         if current is None:
             raise RuntimeError(f"Job '{job_id}' does not exist.")
 
+        log_workflow_step(
+            repo,
+            step="automation",
+            phase="stage",
+            message=f"Job '{job_id}' stage: {stage_name}.",
+            details=f"target_progress={target_progress}",
+        )
         repo.update_scheduler_job(
             current,
             status="Running",

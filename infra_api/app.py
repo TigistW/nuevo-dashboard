@@ -326,6 +326,23 @@ def _short_code(country: str) -> str:
     return token[:2] if len(token) >= 2 else token.ljust(2, "x")
 
 
+def _is_country_config_http_error(exc: HTTPException) -> bool:
+    detail = str(exc.detail or "").lower()
+    return exc.status_code == 400 and (
+        "openvpn profile not found" in detail or "no compose service found for profile" in detail
+    )
+
+
+def _rotate_for_country(country: str) -> tuple[str, str, str]:
+    service_name, profile = _service_for_country(country)
+    if _should_prepare_proxy_config(profile, service_name):
+        _prepare_proxy_config(profile)
+    _proxy_compose(["up", "-d", "--force-recreate", service_name])
+    _wait_for_tun(service_name, timeout_seconds=60)
+    public_ip = _get_public_ip_for_service(service_name) or ""
+    return public_ip, service_name, profile
+
+
 def _vm_script(name: str, fallback: str) -> str:
     script = _resolve_path(SETTINGS.microvm_home, name)
     if Path(script).exists():
@@ -397,17 +414,27 @@ def delete_vm(payload: VmDeleteRequest) -> dict[str, str]:
 
 @APP.post("/v1/proxy/rotate", dependencies=[Depends(proxy_auth)])
 def rotate_proxy(payload: ProxyRotateRequest) -> dict[str, str | int]:
-    service_name, profile = _service_for_country(payload.country)
-    if _should_prepare_proxy_config(profile, service_name):
-        _prepare_proxy_config(profile)
+    requested_country = payload.country.strip()
+    fallback_country = "us"
+    country_used = requested_country
+    service_name = ""
+    profile = ""
 
-    _proxy_compose(["up", "-d", "--force-recreate", service_name])
-    _wait_for_tun(service_name, timeout_seconds=60)
-    public_ip = _get_public_ip_for_service(service_name) or ""
+    try:
+        public_ip, service_name, profile = _rotate_for_country(requested_country)
+    except HTTPException as exc:
+        if requested_country.lower() in {"us", "usa"} or not _is_country_config_http_error(exc):
+            raise
+        public_ip, service_name, profile = _rotate_for_country(fallback_country)
+        country_used = fallback_country
+
     return {
         "public_ip": public_ip,
-        "latency_ms": _estimate_latency(payload.country),
+        "latency_ms": _estimate_latency(country_used),
         "asn": f"AS{random.randint(10000, 99999)}",
+        "country_used": country_used,
+        "service_name": service_name,
+        "profile": profile,
     }
 
 

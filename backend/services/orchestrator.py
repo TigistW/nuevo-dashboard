@@ -20,6 +20,7 @@ from .utils import (
     seconds_to_uptime,
     short_code,
 )
+from .workflow_logging import log_workflow_step
 
 
 ACTIVE_VM_STATES = {"creating", "running", "stopping", "restarting"}
@@ -33,29 +34,75 @@ class OrchestratorService:
         self.repo = repo
 
     def create_vm(self, vm: MicroVMCreate, background_tasks: BackgroundTasks) -> MicroVMResponse:
+        log_workflow_step(
+            self.repo,
+            step="create_vm",
+            phase="request",
+            message=f"Received VM create request for '{vm.id}'.",
+            details=f"country={vm.country}, ram={vm.ram}, cpu={vm.cpu}, template={vm.template_id}",
+        )
         existing = self.repo.get_vm(vm.id)
         if existing is not None and existing.status != "deleted":
+            log_workflow_step(
+                self.repo,
+                step="create_vm",
+                phase="rejected",
+                message=f"VM '{vm.id}' already exists.",
+                details=f"status={existing.status}",
+                level="WARNING",
+            )
             raise HTTPException(status_code=409, detail=f"VM '{vm.id}' already exists.")
 
         template = self.repo.get_template(vm.template_id)
         if template is None:
+            log_workflow_step(
+                self.repo,
+                step="create_vm",
+                phase="rejected",
+                message=f"Template '{vm.template_id}' not found.",
+                level="WARNING",
+            )
             raise HTTPException(status_code=404, detail=f"Template '{vm.template_id}' not found.")
 
         try:
             ram_mb = parse_ram_to_mb(vm.ram)
             cpu_cores = parse_cpu_cores(vm.cpu)
         except ValueError as exc:
+            log_workflow_step(
+                self.repo,
+                step="create_vm",
+                phase="rejected",
+                message=f"Invalid sizing for VM '{vm.id}'.",
+                details=str(exc),
+                level="WARNING",
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         guardrails = self.repo.get_guardrails()
         if guardrails is not None:
             active_vms = self.repo.count_vms(statuses=ACTIVE_VM_STATES)
             if active_vms >= guardrails.max_vms:
+                log_workflow_step(
+                    self.repo,
+                    step="create_vm",
+                    phase="guardrail",
+                    message="Rejected by max_vms guardrail.",
+                    details=f"active_vms={active_vms}, max_vms={guardrails.max_vms}",
+                    level="WARNING",
+                )
                 raise HTTPException(
                     status_code=409,
                     detail=f"Guardrail violation: max_vms={guardrails.max_vms} reached.",
                 )
             if cpu_cores > guardrails.max_cpu_per_vm:
+                log_workflow_step(
+                    self.repo,
+                    step="create_vm",
+                    phase="guardrail",
+                    message="Rejected by max_cpu_per_vm guardrail.",
+                    details=f"requested_cpu={cpu_cores}, max_cpu_per_vm={guardrails.max_cpu_per_vm}",
+                    level="WARNING",
+                )
                 raise HTTPException(
                     status_code=400,
                     detail=f"Guardrail violation: CPU per VM exceeds {guardrails.max_cpu_per_vm}.",
@@ -63,6 +110,17 @@ class OrchestratorService:
             used_ram_mb = self.repo.sum_vm_ram_mb(statuses=ACTIVE_VM_STATES)
             free_after_create = settings.host_total_ram_mb - (used_ram_mb + ram_mb)
             if guardrails.overload_prevention and free_after_create < guardrails.min_host_ram_mb:
+                log_workflow_step(
+                    self.repo,
+                    step="create_vm",
+                    phase="guardrail",
+                    message="Rejected by host reserve RAM guardrail.",
+                    details=(
+                        f"used_ram_mb={used_ram_mb}, requested_ram_mb={ram_mb}, "
+                        f"free_after_create={free_after_create}, min_host_ram_mb={guardrails.min_host_ram_mb}"
+                    ),
+                    level="WARNING",
+                )
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -87,6 +145,13 @@ class OrchestratorService:
             message="VM creation queued.",
         )
         self.repo.add_log("Orchestrator", "INFO", f"VM {created_vm.id} queued for creation.")
+        log_workflow_step(
+            self.repo,
+            step="create_vm",
+            phase="queued",
+            message=f"VM '{created_vm.id}' queued for provisioning.",
+            details=f"operation_id={operation.id}",
+        )
         background_tasks.add_task(_run_vm_create_task, created_vm.id, operation.id)
         return self._to_vm_response(created_vm)
 
@@ -201,6 +266,13 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
     repo = StorageRepository(db)
     try:
         repo.update_operation_status(operation_id, "running", "Provisioning VM resources.")
+        log_workflow_step(
+            repo,
+            step="create_vm",
+            phase="running",
+            message=f"Provisioning started for VM '{vm_id}'.",
+            details=f"operation_id={operation_id}",
+        )
         vm = repo.get_vm(vm_id)
         if vm is None:
             raise RuntimeError(f"VM '{vm_id}' does not exist.")
@@ -210,6 +282,13 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
             raise RuntimeError(f"Template '{vm.template_id}' not found.")
 
         adapter = InfrastructureAdapter()
+        log_workflow_step(
+            repo,
+            step="create_vm",
+            phase="infra",
+            message=f"Calling infrastructure adapter for VM '{vm.id}'.",
+            details=f"country={vm.country}, ram_mb={vm.ram_mb}, cpu_cores={vm.cpu_cores}",
+        )
         infra_result = adapter.provision_vm(
             vm_id=vm.id,
             country=vm.country,
@@ -217,7 +296,18 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
             cpu_cores=vm.cpu_cores,
             template_base_image=template.base_image,
         )
+        log_workflow_step(
+            repo,
+            step="create_vm",
+            phase="infra",
+            message=f"Infrastructure provision finished for VM '{vm.id}'.",
+            details=f"public_ip={infra_result.public_ip}, provider={infra_result.provider}",
+        )
         vm_public_ip = infra_result.public_ip
+        verification_status = "Secure"
+        identity_status = "Secure"
+        trust_score = 96
+        identity_asn = f"AS{random.randint(10000, 99999)}"
         tunnel = repo.find_connected_tunnel_by_country(vm.country)
         if tunnel is None:
             tunnel_id = f"wg-{short_code(vm.country)}-{random.randint(10, 99)}"
@@ -241,15 +331,59 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
             )
 
         repo.update_operation_status(operation_id, "running", f"Applying {vm.country} tunnel profile.")
-        rotation_result = adapter.rotate_tunnel(vm_id=vm.id, tunnel_id=tunnel.id, country=vm.country)
-        vm_public_ip = rotation_result.public_ip or vm_public_ip
-        repo.update_tunnel(
-            tunnel,
-            public_ip=vm_public_ip,
-            latency_ms=rotation_result.latency_ms,
-            status="Connected",
-            vm_id=vm.id,
+        log_workflow_step(
+            repo,
+            step="assign_ip",
+            phase="running",
+            message=f"Starting tunnel rotation for VM '{vm.id}'.",
+            details=f"tunnel_id={tunnel.id}, country={vm.country}",
         )
+        rotation_result = None
+        rotation_error: str | None = None
+        try:
+            rotation_result = adapter.rotate_tunnel(vm_id=vm.id, tunnel_id=tunnel.id, country=vm.country)
+            vm_public_ip = rotation_result.public_ip or vm_public_ip
+            identity_asn = rotation_result.asn
+            log_workflow_step(
+                repo,
+                step="assign_ip",
+                phase="success",
+                message=f"Tunnel rotation succeeded for VM '{vm.id}'.",
+                details=f"tunnel_id={tunnel.id}, public_ip={vm_public_ip}, asn={identity_asn}",
+            )
+            repo.update_tunnel(
+                tunnel,
+                public_ip=vm_public_ip,
+                latency_ms=rotation_result.latency_ms,
+                status="Connected",
+                vm_id=vm.id,
+            )
+        except Exception as exc:
+            rotation_error = str(exc)
+            verification_status = "Warning"
+            identity_status = "Warning"
+            trust_score = 80
+            repo.update_tunnel(
+                tunnel,
+                public_ip=tunnel.public_ip or vm_public_ip,
+                latency_ms=tunnel.latency_ms or infra_result.latency_ms,
+                status="Connected",
+                vm_id=vm.id,
+            )
+            repo.add_log(
+                "Orchestrator",
+                "WARNING",
+                f"Tunnel rotation failed during VM create for {vm.id}.",
+                rotation_error,
+            )
+            log_workflow_step(
+                repo,
+                step="assign_ip",
+                phase="warning",
+                message=f"Tunnel rotation deferred for VM '{vm.id}'.",
+                details=rotation_error,
+                level="WARNING",
+            )
 
         repo.update_vm(
             vm,
@@ -257,19 +391,19 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
             public_ip=vm_public_ip,
             network_id=tunnel.id,
             exit_node=infra_result.exit_node,
-            verification_status="Secure",
+            verification_status=verification_status,
             uptime_seconds=0,
         )
         repo.upsert_identity(
             vm_id=vm.id,
             public_ip=vm_public_ip,
             isp=tunnel.provider,
-            asn=rotation_result.asn,
+            asn=identity_asn,
             ip_type="Datacenter",
             country=vm.country,
             city=None,
-            status="Secure",
-            trust_score=96,
+            status=identity_status,
+            trust_score=trust_score,
         )
         infra_summary = summarize_command_runs(infra_result.command_runs)
         if infra_summary:
@@ -279,16 +413,27 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
                 f"Infrastructure commands for VM {vm.id}.",
                 infra_summary,
             )
-        rotation_summary = summarize_command_runs(rotation_result.command_runs)
-        if rotation_summary:
-            repo.add_log(
-                "Orchestrator",
-                "DEBUG",
-                f"Rotation commands for VM {vm.id}.",
-                rotation_summary,
-            )
-        repo.update_operation_status(operation_id, "succeeded", f"VM '{vm.id}' is running.")
+        if rotation_result is not None:
+            rotation_summary = summarize_command_runs(rotation_result.command_runs)
+            if rotation_summary:
+                repo.add_log(
+                    "Orchestrator",
+                    "DEBUG",
+                    f"Rotation commands for VM {vm.id}.",
+                    rotation_summary,
+                )
+        success_message = f"VM '{vm.id}' is running."
+        if rotation_error:
+            success_message = f"{success_message} Tunnel rotation deferred: {rotation_error}"
+        repo.update_operation_status(operation_id, "succeeded", success_message)
         repo.add_log("Orchestrator", "INFO", f"VM {vm.id} is now running.")
+        log_workflow_step(
+            repo,
+            step="create_vm",
+            phase="success",
+            message=f"VM '{vm.id}' is running.",
+            details=f"public_ip={vm_public_ip}, network_id={tunnel.id}, verification_status={verification_status}",
+        )
     except Exception as exc:
         vm = repo.get_vm(vm_id)
         if vm is not None and vm.status != "deleted":
@@ -298,6 +443,14 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
         except Exception:
             pass
         repo.add_log("Orchestrator", "ERROR", f"VM {vm_id} creation failed.", str(exc))
+        log_workflow_step(
+            repo,
+            step="create_vm",
+            phase="failed",
+            message=f"VM '{vm_id}' provisioning failed.",
+            details=str(exc),
+            level="ERROR",
+        )
     finally:
         db.close()
 

@@ -15,6 +15,7 @@ from ..models import (
     WorkflowExecutionResponse,
 )
 from ..repositories import StorageRepository
+from .workflow_logging import log_workflow_step
 
 
 class RepositoryService:
@@ -83,12 +84,33 @@ class RepositoryService:
         return [ThreatPoint(time=item.time_label, threats=item.threats) for item in samples]
 
     def terminal_command(self, vm_id: str, command: str) -> TerminalCommandResponse:
+        log_workflow_step(
+            self.repo,
+            step="execute_task",
+            phase="request",
+            message=f"Terminal command requested for VM '{vm_id}'.",
+            details=f"command={command}",
+        )
         vm = self.repo.get_vm(vm_id)
         if vm is None or vm.status == "deleted":
+            log_workflow_step(
+                self.repo,
+                step="execute_task",
+                phase="rejected",
+                message=f"VM '{vm_id}' not found for terminal command.",
+                level="WARNING",
+            )
             raise HTTPException(status_code=404, detail=f"VM '{vm_id}' not found.")
 
         sanitized = command.strip()
         if not sanitized:
+            log_workflow_step(
+                self.repo,
+                step="execute_task",
+                phase="rejected",
+                message="Empty terminal command rejected.",
+                level="WARNING",
+            )
             raise HTTPException(status_code=400, detail="Command cannot be empty.")
 
         canned = {
@@ -99,6 +121,13 @@ class RepositoryService:
         }
         output = canned.get(sanitized, f"sh: {sanitized}: command not found")
         self.repo.add_log("Terminal", "INFO", f"Command on {vm_id}: {sanitized}")
+        log_workflow_step(
+            self.repo,
+            step="execute_task",
+            phase="success",
+            message=f"Terminal command completed for VM '{vm_id}'.",
+            details=f"command={sanitized}, output={output[:160]}",
+        )
         return TerminalCommandResponse(output=output)
 
     def execute_workflow(self, workflow_id: str, background_tasks: BackgroundTasks) -> WorkflowExecutionResponse:

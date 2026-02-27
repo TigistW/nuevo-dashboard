@@ -68,6 +68,7 @@ class IntelligenceService:
                 "source": item.source,
                 "level": item.level,
                 "msg": item.message,
+                "details": item.details,
             }
             for item in logs
         ]

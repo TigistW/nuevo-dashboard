@@ -6,6 +6,7 @@ from ..database import SessionLocal
 from ..models import Guardrails, OperationStatus, Template
 from ..repositories import StorageRepository
 from .utils import isoformat_or_none
+from .workflow_logging import log_workflow_step
 
 
 class GovernanceService:
@@ -46,12 +47,32 @@ class GovernanceService:
         )
 
     def sync_fingerprint(self, vm_id: str, background_tasks: BackgroundTasks) -> OperationStatus:
+        log_workflow_step(
+            self.repo,
+            step="fingerprint",
+            phase="request",
+            message=f"Fingerprint sync requested for VM '{vm_id}'.",
+        )
         vm = self.repo.get_vm(vm_id)
         if vm is None or vm.status == "deleted":
+            log_workflow_step(
+                self.repo,
+                step="fingerprint",
+                phase="rejected",
+                message=f"VM '{vm_id}' not found for fingerprint sync.",
+                level="WARNING",
+            )
             raise HTTPException(status_code=404, detail=f"VM '{vm_id}' not found.")
 
         in_flight = self.repo.get_latest_operation("fingerprint", vm_id, "sync", {"pending", "running"})
         if in_flight is not None:
+            log_workflow_step(
+                self.repo,
+                step="fingerprint",
+                phase="deduplicated",
+                message=f"Returning in-flight fingerprint sync for VM '{vm_id}'.",
+                details=f"operation_id={in_flight.id}",
+            )
             return self._to_operation(in_flight)
 
         operation = self.repo.create_operation(
@@ -62,6 +83,13 @@ class GovernanceService:
             message=f"Fingerprint sync queued for VM '{vm_id}'.",
         )
         self.repo.add_log("Governance", "INFO", f"Fingerprint sync requested for VM {vm_id}.")
+        log_workflow_step(
+            self.repo,
+            step="fingerprint",
+            phase="queued",
+            message=f"Fingerprint sync queued for VM '{vm_id}'.",
+            details=f"operation_id={operation.id}",
+        )
         background_tasks.add_task(_run_fingerprint_sync_task, vm_id, operation.id)
         return self._to_operation(operation)
 
@@ -84,6 +112,13 @@ def _run_fingerprint_sync_task(vm_id: str, operation_id: str) -> None:
     repo = StorageRepository(db)
     try:
         repo.update_operation_status(operation_id, "running", "Fingerprint sync in progress.")
+        log_workflow_step(
+            repo,
+            step="fingerprint",
+            phase="running",
+            message=f"Fingerprint sync started for VM '{vm_id}'.",
+            details=f"operation_id={operation_id}",
+        )
         vm = repo.get_vm(vm_id)
         if vm is None:
             raise RuntimeError(f"VM '{vm_id}' not found.")
@@ -91,11 +126,25 @@ def _run_fingerprint_sync_task(vm_id: str, operation_id: str) -> None:
         repo.update_vm(vm, verification_status="Secure")
         repo.update_operation_status(operation_id, "succeeded", f"Fingerprint synced for VM '{vm_id}'.")
         repo.add_log("Governance", "INFO", f"Fingerprint synced for VM {vm_id}.")
+        log_workflow_step(
+            repo,
+            step="fingerprint",
+            phase="success",
+            message=f"Fingerprint sync completed for VM '{vm_id}'.",
+        )
     except Exception as exc:
         try:
             repo.update_operation_status(operation_id, "failed", str(exc))
         except Exception:
             pass
         repo.add_log("Governance", "ERROR", f"Fingerprint sync failed for VM {vm_id}.", str(exc))
+        log_workflow_step(
+            repo,
+            step="fingerprint",
+            phase="failed",
+            message=f"Fingerprint sync failed for VM '{vm_id}'.",
+            details=str(exc),
+            level="ERROR",
+        )
     finally:
         db.close()

@@ -14,6 +14,7 @@ from .utils import (
     normalize_country,
     short_code,
 )
+from .workflow_logging import log_workflow_step
 
 
 class NetworkService:
@@ -43,8 +44,21 @@ class NetworkService:
         ]
 
     def rotate_ip(self, vm_id: str, background_tasks: BackgroundTasks) -> OperationStatus:
+        log_workflow_step(
+            self.repo,
+            step="assign_ip",
+            phase="request",
+            message=f"IP rotation requested for VM '{vm_id}'.",
+        )
         vm = self.repo.get_vm(vm_id)
         if vm is None or vm.status == "deleted":
+            log_workflow_step(
+                self.repo,
+                step="assign_ip",
+                phase="rejected",
+                message=f"VM '{vm_id}' not found for IP rotation.",
+                level="WARNING",
+            )
             raise HTTPException(status_code=404, detail=f"VM '{vm_id}' not found.")
 
         tunnel = self.repo.find_tunnel_for_vm(vm_id)
@@ -68,6 +82,13 @@ class NetworkService:
 
         in_flight = self.repo.get_latest_operation("tunnel", tunnel.id, "rotate", {"pending", "running"})
         if in_flight is not None:
+            log_workflow_step(
+                self.repo,
+                step="assign_ip",
+                phase="deduplicated",
+                message=f"Returning in-flight rotation for VM '{vm_id}'.",
+                details=f"operation_id={in_flight.id}, tunnel_id={tunnel.id}",
+            )
             return self._to_operation_response(in_flight)
 
         operation = self.repo.create_operation(
@@ -78,6 +99,13 @@ class NetworkService:
             message=f"IP rotation queued for VM '{vm_id}'.",
         )
         self.repo.add_log("Network", "INFO", f"IP rotation requested for VM {vm_id}.")
+        log_workflow_step(
+            self.repo,
+            step="assign_ip",
+            phase="queued",
+            message=f"IP rotation queued for VM '{vm_id}'.",
+            details=f"operation_id={operation.id}, tunnel_id={tunnel.id}, country={vm.country}",
+        )
         background_tasks.add_task(_run_rotation_task, vm_id, tunnel.id, operation.id)
         return self._to_operation_response(operation)
 
@@ -108,6 +136,12 @@ class NetworkService:
         return self._to_tunnel_response(tunnel)
 
     def dns_leak_test(self) -> dict:
+        log_workflow_step(
+            self.repo,
+            step="verification",
+            phase="running",
+            message="DNS leak test started.",
+        )
         leaks: list[dict] = []
         for vm in self.repo.list_vms(include_deleted=False):
             if vm.status != "running":
@@ -119,7 +153,18 @@ class NetworkService:
             if tunnel is None or tunnel.status != "Connected":
                 leaks.append({"vm_id": vm.id, "issue": "Assigned tunnel is not connected"})
 
-        return {"status": "Secure" if not leaks else "LeakDetected", "leaks": leaks}
+        status = "Secure" if not leaks else "LeakDetected"
+        level = "INFO" if status == "Secure" else "WARNING"
+        details = None if not leaks else "; ".join(f"{item['vm_id']}:{item['issue']}" for item in leaks)
+        log_workflow_step(
+            self.repo,
+            step="verification",
+            phase="dns",
+            message=f"DNS leak test completed with status '{status}'.",
+            details=details,
+            level=level,
+        )
+        return {"status": status, "leaks": leaks}
 
     def _to_tunnel_response(self, tunnel) -> TunnelResponse:
         return TunnelResponse(
@@ -150,6 +195,13 @@ def _run_rotation_task(vm_id: str, tunnel_id: str, operation_id: str) -> None:
     repo = StorageRepository(db)
     try:
         repo.update_operation_status(operation_id, "running", "Tunnel rotation in progress.")
+        log_workflow_step(
+            repo,
+            step="assign_ip",
+            phase="running",
+            message=f"Tunnel rotation started for VM '{vm_id}'.",
+            details=f"operation_id={operation_id}, tunnel_id={tunnel_id}",
+        )
         vm = repo.get_vm(vm_id)
         tunnel = repo.get_tunnel(tunnel_id)
         if vm is None or tunnel is None:
@@ -184,11 +236,26 @@ def _run_rotation_task(vm_id: str, tunnel_id: str, operation_id: str) -> None:
         if summary:
             repo.add_log("Network", "DEBUG", f"Rotation commands for tunnel {tunnel.id}.", summary)
         repo.add_log("Network", "INFO", f"Rotated tunnel {tunnel.id} for VM {vm.id}.")
+        log_workflow_step(
+            repo,
+            step="assign_ip",
+            phase="success",
+            message=f"IP rotation completed for VM '{vm.id}'.",
+            details=f"public_ip={new_ip}, tunnel_id={tunnel.id}",
+        )
     except Exception as exc:
         try:
             repo.update_operation_status(operation_id, "failed", str(exc))
         except Exception:
             pass
         repo.add_log("Network", "ERROR", f"Tunnel rotation failed for VM {vm_id}.", str(exc))
+        log_workflow_step(
+            repo,
+            step="assign_ip",
+            phase="failed",
+            message=f"IP rotation failed for VM '{vm_id}'.",
+            details=str(exc),
+            level="ERROR",
+        )
     finally:
         db.close()
