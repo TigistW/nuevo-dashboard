@@ -259,11 +259,28 @@ def _should_prepare_proxy_config(profile: str, service_name: str) -> bool:
     return service_name != f"proxy-{profile}"
 
 
+def _resolve_profile_config(profile: str) -> Path:
+    configs_dir = Path(SETTINGS.microvm_proxy_home) / "configs"
+    exact = configs_dir / f"{profile}.ovpn"
+    if exact.exists():
+        return exact
+
+    candidates = sorted(configs_dir.glob(f"{profile}-*.ovpn"))
+    if candidates:
+        return random.choice(candidates)
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"OpenVPN profile not found for '{profile}' in {configs_dir} "
+            f"(expected {profile}.ovpn or {profile}-*.ovpn)."
+        ),
+    )
+
+
 def _prepare_proxy_config(profile: str) -> None:
-    src = Path(SETTINGS.microvm_proxy_home) / "configs" / f"{profile}.ovpn"
+    src = _resolve_profile_config(profile)
     dst = Path(SETTINGS.microvm_proxy_home) / "config.ovpn"
-    if not src.exists():
-        raise HTTPException(status_code=400, detail=f"OpenVPN profile not found: {src}")
     shutil.copyfile(src, dst)
 
 

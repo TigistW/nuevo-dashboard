@@ -86,11 +86,15 @@ You can run this in two valid patterns.
 ### A) Single-service pattern (simplest)
 
 - Keep only one compose service, for example `proxy-us`.
-- Put all country configs in `microvm-proxy/configs/` (`us.ovpn`, `de.ovpn`, `ca.ovpn`, ...).
+- Put all country configs in `microvm-proxy/configs/`.
+- Supported filename patterns:
+  - `us.ovpn`, `de.ovpn`, `ca.ovpn` (direct profile files)
+  - `us-s16.ovpn`, `us-s178.ovpn`, `de-s20.ovpn` (multi-endpoint per profile)
+- When multiple `<profile>-*.ovpn` files exist, the rotate/register flow picks one automatically for that request.
 - Set:
   - `PROXY_SELECTION_MODE=config`
   - `PROXY_SERVICE_NAME=proxy-us`
-- On each rotate/register call, the API copies `configs/<profile>.ovpn` into `config.ovpn` and recreates that one service.
+- On each rotate/register call, the API copies the resolved profile file (exact `<profile>.ovpn` or one `<profile>-*.ovpn`) into `config.ovpn` and recreates that one service.
 
 ### B) Multi-service pattern (parallel by country)
 

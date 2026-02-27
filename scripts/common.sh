@@ -166,13 +166,27 @@ country_to_profile() {
 
 prepare_proxy_config() {
   local profile="$1"
-  local src="$MICROVM_PROXY_HOME/configs/$profile.ovpn"
+  local src=""
+  local configs_dir="$MICROVM_PROXY_HOME/configs"
+  local direct_candidate="$configs_dir/$profile.ovpn"
+  if [[ -f "$direct_candidate" ]]; then
+    src="$direct_candidate"
+  else
+    local matches=()
+    shopt -s nullglob
+    matches=("$configs_dir/$profile"-*.ovpn)
+    shopt -u nullglob
+    if [[ "${#matches[@]}" -gt 0 ]]; then
+      src="${matches[$((RANDOM % ${#matches[@]}))]}"
+    fi
+  fi
   local dst="$MICROVM_PROXY_HOME/config.ovpn"
-  if [[ ! -f "$src" ]]; then
-    echo "OpenVPN config not found: $src" >&2
+  if [[ -z "$src" || ! -f "$src" ]]; then
+    echo "OpenVPN config not found for profile '$profile' under $configs_dir (expected $profile.ovpn or $profile-*.ovpn)." >&2
     exit 1
   fi
   cp "$src" "$dst"
+  echo "Using OpenVPN config $(basename "$src") for profile '$profile'." >&2
 }
 
 print_public_ip() {
