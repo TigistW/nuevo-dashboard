@@ -251,7 +251,12 @@ type OperationWaitOptions = {
   onUpdate?: (operation: ApiOperationStatus) => void;
 };
 
-async function waitForVmReady(vmId: string, timeoutMs = 180_000, pollMs = 900): Promise<ApiMicroVm> {
+async function waitForVmReady(
+  vmId: string,
+  timeoutMs = 180_000,
+  pollMs = 900,
+  requirePublicIp = true
+): Promise<ApiMicroVm> {
   const startedAt = Date.now();
   let lastVm: ApiMicroVm | null = null;
 
@@ -262,7 +267,10 @@ async function waitForVmReady(vmId: string, timeoutMs = 180_000, pollMs = 900): 
       lastVm = vm;
       const status = (vm.status || '').toLowerCase();
       const ip = (vm.public_ip || '').toLowerCase();
-      if (status.includes('running') && ip && ip !== 'pending') {
+      if (status.includes('error') || status.includes('deleted')) {
+        throw new Error(`VM '${vmId}' entered terminal state '${vm.status}' during provisioning.`);
+      }
+      if (status.includes('running') && (!requirePublicIp || (ip && ip !== 'pending'))) {
         return vm;
       }
     }
@@ -271,7 +279,8 @@ async function waitForVmReady(vmId: string, timeoutMs = 180_000, pollMs = 900): 
 
   const lastStatus = lastVm?.status || 'Unknown';
   const lastIp = lastVm?.public_ip || 'Pending';
-  throw new Error(`Timed out waiting for VM '${vmId}' to become Running (status=${lastStatus}, ip=${lastIp}).`);
+  const expected = requirePublicIp ? 'Running with public IP' : 'Running';
+  throw new Error(`Timed out waiting for VM '${vmId}' to become ${expected} (status=${lastStatus}, ip=${lastIp}).`);
 }
 
 async function waitForOperationSuccess(
@@ -633,12 +642,16 @@ const WorkflowBuilder: React.FC = () => {
             }
           }
 
-          const vm = await waitForVmReady(vmId);
-          nextContext = { ...nextContext, vmId: vm.id, publicIp: vm.public_ip, ipAssignedOnCreate: true };
+          const vm = await waitForVmReady(vmId, 180_000, 900, false);
+          const hasUsableIp =
+            (vm.public_ip || '').trim().toLowerCase() !== 'pending' && (vm.public_ip || '').trim() !== '';
+          nextContext = { ...nextContext, vmId: vm.id, publicIp: vm.public_ip, ipAssignedOnCreate: hasUsableIp };
           setContext(nextContext);
           nextSteps = setStepState(nextSteps, step.id, {
             status: 'succeeded',
-            message: `VM '${vm.id}' Running @ ${vm.public_ip}`,
+            message: hasUsableIp
+              ? `VM '${vm.id}' Running @ ${vm.public_ip}`
+              : `VM '${vm.id}' Running (IP pending; Assign Network/IP will complete it).`,
           });
           setSteps(nextSteps);
           persistSnapshot('running');
