@@ -19,5 +19,5 @@ async def get_security_audit(service: SecurityService = Depends(get_service)):
 
 
 @router.post("/test-isolation")
-async def test_isolation(service: SecurityService = Depends(get_service)):
-    return service.test_isolation()
+async def test_isolation(vm_id: str | None = None, service: SecurityService = Depends(get_service)):
+    return service.test_isolation(vm_id=vm_id)

@@ -773,7 +773,11 @@ const WorkflowBuilder: React.FC = () => {
         }
 
         if (step.type === 'verification') {
-          const [dns, isolation] = await Promise.all([dnsLeakTest(), testIsolation()]);
+          const vmId = await resolveVmId(nextContext, config);
+          nextContext = { ...nextContext, vmId };
+          setContext(nextContext);
+
+          const [dns, isolation] = await Promise.all([dnsLeakTest(vmId), testIsolation(vmId)]);
           const dnsOk = (dns.status || '').toLowerCase() === 'secure';
           const isoOk = (isolation.status || '').toLowerCase() === 'passed';
           if (!dnsOk || !isoOk) {

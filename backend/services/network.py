@@ -135,15 +135,22 @@ class NetworkService:
         self.repo.add_log("Network", "INFO", f"Registered new VPS tunnel {tunnel.id} ({normalized_country}).")
         return self._to_tunnel_response(tunnel)
 
-    def dns_leak_test(self) -> dict:
+    def dns_leak_test(self, vm_id: str | None = None) -> dict:
         log_workflow_step(
             self.repo,
             step="verification",
             phase="running",
             message="DNS leak test started.",
+            details=f"scope_vm_id={vm_id or 'all'}",
         )
+        target_vms = self.repo.list_vms(include_deleted=False)
+        if vm_id:
+            target_vms = [vm for vm in target_vms if vm.id == vm_id and vm.status != "deleted"]
+            if not target_vms:
+                raise HTTPException(status_code=404, detail=f"VM '{vm_id}' not found.")
+
         leaks: list[dict] = []
-        for vm in self.repo.list_vms(include_deleted=False):
+        for vm in target_vms:
             if vm.status != "running":
                 continue
             if not vm.network_id:

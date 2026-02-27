@@ -43,5 +43,5 @@ async def register_vps(
 
 
 @router.get("/dns-leak-test")
-async def dns_leak_test(service: NetworkService = Depends(get_service)):
-    return service.dns_leak_test()
+async def dns_leak_test(vm_id: str | None = None, service: NetworkService = Depends(get_service)):
+    return service.dns_leak_test(vm_id=vm_id)

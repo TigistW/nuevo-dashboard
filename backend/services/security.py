@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from fastapi import HTTPException
+
 from ..config import settings
 from ..models import SecurityAuditResponse
 from ..repositories import StorageRepository
@@ -57,14 +59,20 @@ class SecurityService:
         )
         return response
 
-    def test_isolation(self) -> dict:
+    def test_isolation(self, vm_id: str | None = None) -> dict:
         log_workflow_step(
             self.repo,
             step="verification",
             phase="isolation",
             message="Isolation test started.",
+            details=f"scope_vm_id={vm_id or 'all'}",
         )
-        running_vms = [vm for vm in self.repo.list_vms(include_deleted=False) if vm.status == "running"]
+        candidate_vms = self.repo.list_vms(include_deleted=False)
+        if vm_id:
+            candidate_vms = [vm for vm in candidate_vms if vm.id == vm_id and vm.status != "deleted"]
+            if not candidate_vms:
+                raise HTTPException(status_code=404, detail=f"VM '{vm_id}' not found.")
+        running_vms = [vm for vm in candidate_vms if vm.status == "running"]
         tunnels = self.repo.list_tunnels()
         tunnel_map = {tunnel.id: tunnel for tunnel in tunnels}
         runtime_snapshot = InfrastructureAdapter().collect_security_snapshot()

@@ -207,16 +207,18 @@ export function registerTunnel(country: string, ip: string, provider: string): P
   return requestJson<ApiTunnel>(`/api/v1/network/tunnels/register?${query.toString()}`, "POST");
 }
 
-export function dnsLeakTest(): Promise<ApiDnsLeakResult> {
-  return requestJson<ApiDnsLeakResult>("/api/v1/network/dns-leak-test", "GET");
+export function dnsLeakTest(vmId?: string): Promise<ApiDnsLeakResult> {
+  const query = vmId ? `?${new URLSearchParams({ vm_id: vmId }).toString()}` : "";
+  return requestJson<ApiDnsLeakResult>(`/api/v1/network/dns-leak-test${query}`, "GET");
 }
 
 export function getSecurityAudit(): Promise<ApiSecurityAudit> {
   return requestJson<ApiSecurityAudit>("/api/v1/security/audit", "GET");
 }
 
-export function testIsolation(): Promise<{ status: string; details: string }> {
-  return requestJson<{ status: string; details: string }>("/api/v1/security/test-isolation", "POST");
+export function testIsolation(vmId?: string): Promise<{ status: string; details: string }> {
+  const query = vmId ? `?${new URLSearchParams({ vm_id: vmId }).toString()}` : "";
+  return requestJson<{ status: string; details: string }>(`/api/v1/security/test-isolation${query}`, "POST");
 }
 
 export function syncFingerprint(vmId: string): Promise<ApiOperationStatus> {
