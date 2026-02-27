@@ -240,6 +240,17 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
                 public_ip=tunnel.public_ip or vm_public_ip,
             )
 
+        repo.update_operation_status(operation_id, "running", f"Applying {vm.country} tunnel profile.")
+        rotation_result = adapter.rotate_tunnel(vm_id=vm.id, tunnel_id=tunnel.id, country=vm.country)
+        vm_public_ip = rotation_result.public_ip or vm_public_ip
+        repo.update_tunnel(
+            tunnel,
+            public_ip=vm_public_ip,
+            latency_ms=rotation_result.latency_ms,
+            status="Connected",
+            vm_id=vm.id,
+        )
+
         repo.update_vm(
             vm,
             status="running",
@@ -253,7 +264,7 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
             vm_id=vm.id,
             public_ip=vm_public_ip,
             isp=tunnel.provider,
-            asn=f"AS{random.randint(10000, 99999)}",
+            asn=rotation_result.asn,
             ip_type="Datacenter",
             country=vm.country,
             city=None,
@@ -267,6 +278,14 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
                 "DEBUG",
                 f"Infrastructure commands for VM {vm.id}.",
                 infra_summary,
+            )
+        rotation_summary = summarize_command_runs(rotation_result.command_runs)
+        if rotation_summary:
+            repo.add_log(
+                "Orchestrator",
+                "DEBUG",
+                f"Rotation commands for VM {vm.id}.",
+                rotation_summary,
             )
         repo.update_operation_status(operation_id, "succeeded", f"VM '{vm.id}' is running.")
         repo.add_log("Orchestrator", "INFO", f"VM {vm.id} is now running.")

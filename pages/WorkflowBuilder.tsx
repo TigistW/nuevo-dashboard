@@ -50,6 +50,7 @@ type WorkflowRunConfig = {
 type WorkflowContext = {
   vmId?: string;
   publicIp?: string;
+  ipAssignedOnCreate?: boolean;
   lastJobId?: string;
   lastCommand?: string;
   lastCommandOutput?: string;
@@ -323,7 +324,11 @@ const WorkflowBuilder: React.FC = () => {
     setInfoText('');
 
     const runId = `wf-${Date.now()}`;
-    let nextContext: WorkflowContext = { ...context, operationByStepId: { ...context.operationByStepId } };
+    let nextContext: WorkflowContext = {
+      ...context,
+      ipAssignedOnCreate: false,
+      operationByStepId: { ...context.operationByStepId },
+    };
     let nextSteps = steps.map((step) => ({ ...step, status: 'pending' as StepStatus, message: '' }));
     let activeStepId: string | null = null;
 
@@ -379,7 +384,7 @@ const WorkflowBuilder: React.FC = () => {
           }
 
           const vm = await waitForVmReady(vmId);
-          nextContext = { ...nextContext, vmId: vm.id, publicIp: vm.public_ip };
+          nextContext = { ...nextContext, vmId: vm.id, publicIp: vm.public_ip, ipAssignedOnCreate: true };
           setContext(nextContext);
           nextSteps = setStepState(nextSteps, step.id, {
             status: 'succeeded',
@@ -395,6 +400,19 @@ const WorkflowBuilder: React.FC = () => {
           nextContext = { ...nextContext, vmId };
           setContext(nextContext);
 
+          const currentIp = (nextContext.publicIp || '').trim();
+          if (nextContext.ipAssignedOnCreate && currentIp && currentIp.toLowerCase() !== 'pending') {
+            nextContext = { ...nextContext, ipAssignedOnCreate: false };
+            setContext(nextContext);
+            nextSteps = setStepState(nextSteps, step.id, {
+              status: 'succeeded',
+              message: `IP already assigned during VM creation: ${currentIp}`,
+            });
+            setSteps(nextSteps);
+            persistSnapshot('running');
+            continue;
+          }
+
           const operation = await rotateVmTunnel(vmId);
           nextContext = {
             ...nextContext,
@@ -402,24 +420,36 @@ const WorkflowBuilder: React.FC = () => {
           };
           setContext(nextContext);
           let lastProgressMessage = '';
-          await waitForOperationSuccess(operation.id, {
-            timeoutMs: 240_000,
-            onUpdate: (op) => {
-              const message = op.message || `Operation ${op.status}`;
-              if (message && message !== lastProgressMessage) {
-                lastProgressMessage = message;
-                nextSteps = setStepState(nextSteps, step.id, { message });
-                setSteps(nextSteps);
-              }
-            },
-          });
+          let operationWaitError: Error | null = null;
+          try {
+            await waitForOperationSuccess(operation.id, {
+              timeoutMs: 360_000,
+              onUpdate: (op) => {
+                const message = op.message || `Operation ${op.status}`;
+                if (message && message !== lastProgressMessage) {
+                  lastProgressMessage = message;
+                  nextSteps = setStepState(nextSteps, step.id, { message });
+                  setSteps(nextSteps);
+                }
+              },
+            });
+          } catch (error) {
+            operationWaitError =
+              error instanceof Error ? error : new Error('Timed out waiting for tunnel rotation operation.');
+          }
           const vm = await waitForVmReady(vmId);
-          nextContext = { ...nextContext, publicIp: vm.public_ip };
+          nextContext = { ...nextContext, publicIp: vm.public_ip, ipAssignedOnCreate: false };
           setContext(nextContext);
+          const hasUsableIp = (vm.public_ip || '').trim().toLowerCase() !== 'pending' && (vm.public_ip || '').trim() !== '';
+          if (operationWaitError && !hasUsableIp) {
+            throw operationWaitError;
+          }
 
           nextSteps = setStepState(nextSteps, step.id, {
             status: 'succeeded',
-            message: `IP rotated: ${vm.public_ip}`,
+            message: operationWaitError
+              ? `IP available: ${vm.public_ip} (operation status update delayed).`
+              : `IP rotated: ${vm.public_ip}`,
           });
           setSteps(nextSteps);
           persistSnapshot('running');
