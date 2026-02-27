@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import math
+import random
 import time
 
 from fastapi import BackgroundTasks, HTTPException
 
 from ..database import SessionLocal
-from ..models import HealingRule, JobEnqueueResponse, Task
+from ..models import AutoscaleDecision, AutoscaleRequest, HealingRule, JobEnqueueResponse, MicroVMCreate, Task
 from ..repositories import StorageRepository
+from .orchestrator import OrchestratorService
 
 RUNNABLE_VM_STATES = {"running"}
 TERMINAL_VM_STATES = {"deleted", "error", "stopped"}
@@ -126,6 +129,122 @@ class AutomationService:
 
         status = "Safe" if all(item["status"] == "Passed" for item in checks) else "Unsafe"
         return {"status": status, "checks": checks}
+
+    def evaluate_autoscale(
+        self,
+        payload: AutoscaleRequest,
+        background_tasks: BackgroundTasks,
+    ) -> AutoscaleDecision:
+        if payload.max_vms < payload.min_vms:
+            raise HTTPException(status_code=400, detail="max_vms must be greater than or equal to min_vms.")
+
+        guardrails = self.repo.get_guardrails()
+        guardrail_max = guardrails.max_vms if guardrails is not None else payload.max_vms
+        effective_max_vms = min(payload.max_vms, guardrail_max)
+        if effective_max_vms < payload.min_vms:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Autoscale limits conflict with guardrails: "
+                    f"min_vms={payload.min_vms}, effective_max_vms={effective_max_vms}."
+                ),
+            )
+
+        running_vms = [vm for vm in self.repo.list_vms(include_deleted=False) if vm.status == "running"]
+        jobs = self.repo.list_scheduler_jobs()
+        active_statuses = {"Queued", "Running", "Retrying"}
+        active_jobs = [job for job in jobs if job.status in active_statuses]
+        queued_jobs = [job for job in jobs if job.status == "Queued"]
+
+        desired_from_jobs = math.ceil(len(active_jobs) / payload.jobs_per_vm) if active_jobs else 0
+        desired_vms = max(payload.min_vms, desired_from_jobs)
+        desired_vms = min(desired_vms, effective_max_vms)
+
+        orchestrator = OrchestratorService(self.repo)
+
+        if len(running_vms) < desired_vms:
+            auto_vm_id = f"auto-{int(time.time() * 1000)}-{random.randint(100, 999)}"
+            vm_payload = MicroVMCreate(
+                id=auto_vm_id,
+                country=payload.country,
+                ram=payload.ram,
+                cpu=payload.cpu,
+                template_id=payload.template_id,
+            )
+            orchestrator.create_vm(vm_payload, background_tasks)
+            operation = self.repo.get_latest_operation(
+                resource_type="vm",
+                resource_id=auto_vm_id,
+                operation="create",
+                statuses={"pending", "running", "succeeded"},
+            )
+            reason = (
+                f"Scale up: running={len(running_vms)} below desired={desired_vms} "
+                f"(active_jobs={len(active_jobs)}, jobs_per_vm={payload.jobs_per_vm})."
+            )
+            self.repo.add_log("Automation", "INFO", "Autoscaler scale-up triggered.", reason)
+            return AutoscaleDecision(
+                status="Adjusted",
+                action="scale_up",
+                reason=reason,
+                running_vms=len(running_vms),
+                desired_vms=desired_vms,
+                active_jobs=len(active_jobs),
+                queued_jobs=len(queued_jobs),
+                operation_id=operation.id if operation is not None else None,
+                affected_vm_id=auto_vm_id,
+            )
+
+        if len(running_vms) > desired_vms:
+            busy_vm_ids = {job.vm_id for job in active_jobs if job.vm_id}
+            idle_candidates = [vm for vm in running_vms if vm.id not in busy_vm_ids]
+            if idle_candidates:
+                target_vm = sorted(idle_candidates, key=lambda vm: vm.created_at, reverse=True)[0]
+                operation = orchestrator.stop_vm(target_vm.id, background_tasks)
+                reason = (
+                    f"Scale down: running={len(running_vms)} above desired={desired_vms}; "
+                    f"selected idle VM '{target_vm.id}'."
+                )
+                self.repo.add_log("Automation", "INFO", "Autoscaler scale-down triggered.", reason)
+                return AutoscaleDecision(
+                    status="Adjusted",
+                    action="scale_down",
+                    reason=reason,
+                    running_vms=len(running_vms),
+                    desired_vms=desired_vms,
+                    active_jobs=len(active_jobs),
+                    queued_jobs=len(queued_jobs),
+                    operation_id=operation.id,
+                    affected_vm_id=target_vm.id,
+                )
+
+            reason = (
+                f"No scale-down candidate: running={len(running_vms)} desired={desired_vms}, "
+                "all running VMs are currently busy."
+            )
+            return AutoscaleDecision(
+                status="NoAction",
+                action="none",
+                reason=reason,
+                running_vms=len(running_vms),
+                desired_vms=desired_vms,
+                active_jobs=len(active_jobs),
+                queued_jobs=len(queued_jobs),
+            )
+
+        reason = (
+            f"Stable: running={len(running_vms)} matches desired={desired_vms} "
+            f"(active_jobs={len(active_jobs)})."
+        )
+        return AutoscaleDecision(
+            status="NoAction",
+            action="none",
+            reason=reason,
+            running_vms=len(running_vms),
+            desired_vms=desired_vms,
+            active_jobs=len(active_jobs),
+            queued_jobs=len(queued_jobs),
+        )
 
 
 def _run_job_task(job_id: str, operation_id: str) -> None:

@@ -1,8 +1,10 @@
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from '../App';
 import { TaskType } from '../types';
 import {
+  autoscaleNow,
+  ApiAutoscaleDecision,
   ApiMicroVm,
   ApiOperationStatus,
   createMicroVm,
@@ -57,6 +59,17 @@ type WorkflowContext = {
   operationByStepId: Record<string, string>;
 };
 
+type AutoscaleConfig = {
+  minVms: number;
+  maxVms: number;
+  jobsPerVm: number;
+  intervalSec: number;
+  country: string;
+  ram: string;
+  cpu: string;
+  templateId: string;
+};
+
 type WorkflowSession = {
   id: string;
   createdAt: string;
@@ -78,6 +91,17 @@ const DEFAULT_CONFIG: WorkflowRunConfig = {
   templateId: 't-001',
   taskType: TaskType.STABLE_DIFFUSION,
   command: 'status',
+};
+
+const DEFAULT_AUTOSCALE_CONFIG: AutoscaleConfig = {
+  minVms: 1,
+  maxVms: 6,
+  jobsPerVm: 2,
+  intervalSec: 25,
+  country: 'us',
+  ram: '256MB',
+  cpu: '1',
+  templateId: 't-001',
 };
 
 const INITIAL_STEPS: WorkflowStep[] = [
@@ -244,6 +268,7 @@ async function resolveVmId(context: WorkflowContext, config: WorkflowRunConfig):
 
 const WorkflowBuilder: React.FC = () => {
   const { t } = useTranslation();
+  const autoscaleInFlightRef = useRef(false);
 
   const availableSteps = useMemo<WorkflowStep[]>(
     () => [
@@ -262,6 +287,9 @@ const WorkflowBuilder: React.FC = () => {
   const [config, setConfig] = useState<WorkflowRunConfig>(DEFAULT_CONFIG);
   const [context, setContext] = useState<WorkflowContext>({ operationByStepId: {} });
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
+  const [isAutoscaleBusy, setIsAutoscaleBusy] = useState<boolean>(false);
+  const [autoScaleEnabled, setAutoScaleEnabled] = useState<boolean>(false);
+  const [autoScaleConfig, setAutoScaleConfig] = useState<AutoscaleConfig>(DEFAULT_AUTOSCALE_CONFIG);
   const [errorText, setErrorText] = useState<string>('');
   const [infoText, setInfoText] = useState<string>('');
   const [savedSession, setSavedSession] = useState<WorkflowSession | null>(null);
@@ -313,6 +341,63 @@ const WorkflowBuilder: React.FC = () => {
     setSavedSession(null);
     setInfoText('Cleared saved workflow session.');
   }, []);
+
+  const runAutoscale = useCallback(
+    async (mode: 'manual' | 'auto' = 'manual') => {
+      if (autoscaleInFlightRef.current) {
+        return;
+      }
+      if (isExecuting) {
+        if (mode === 'manual') {
+          setInfoText('Autoscale skipped while workflow is executing.');
+        }
+        return;
+      }
+
+      autoscaleInFlightRef.current = true;
+      setIsAutoscaleBusy(true);
+      try {
+        const decision: ApiAutoscaleDecision = await autoscaleNow({
+          min_vms: autoScaleConfig.minVms,
+          max_vms: autoScaleConfig.maxVms,
+          jobs_per_vm: autoScaleConfig.jobsPerVm,
+          country: autoScaleConfig.country,
+          ram: autoScaleConfig.ram,
+          cpu: autoScaleConfig.cpu,
+          template_id: autoScaleConfig.templateId,
+        });
+        setErrorText('');
+        const prefix = mode === 'auto' ? 'AutoScale' : 'Autoscale';
+        const vmInfo = decision.affected_vm_id ? ` vm=${decision.affected_vm_id}` : '';
+        if (mode === 'manual' || decision.action !== 'none') {
+          setInfoText(
+            `${prefix} ${decision.action}: ${decision.reason} (running=${decision.running_vms}, desired=${decision.desired_vms}, active_jobs=${decision.active_jobs})${vmInfo}`
+          );
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Autoscale failed.';
+        if (mode === 'manual' || autoScaleEnabled) {
+          setErrorText(message);
+        }
+      } finally {
+        autoscaleInFlightRef.current = false;
+        setIsAutoscaleBusy(false);
+      }
+    },
+    [autoScaleConfig, autoScaleEnabled, isExecuting]
+  );
+
+  useEffect(() => {
+    if (!autoScaleEnabled) {
+      return;
+    }
+    const intervalSeconds = Math.max(10, autoScaleConfig.intervalSec || 10);
+    void runAutoscale('auto');
+    const timer = window.setInterval(() => {
+      void runAutoscale('auto');
+    }, intervalSeconds * 1000);
+    return () => window.clearInterval(timer);
+  }, [autoScaleEnabled, autoScaleConfig.intervalSec, runAutoscale]);
 
   const runWorkflow = useCallback(async () => {
     if (isExecuting) {
@@ -589,6 +674,26 @@ const WorkflowBuilder: React.FC = () => {
           <p className="text-sm text-slate-500 font-mono">Design automated multi-step operational pipelines</p>
         </div>
         <div className="flex gap-3 items-center">
+          <button
+            onClick={() => void runAutoscale('manual')}
+            disabled={isExecuting || isAutoscaleBusy}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded-xl text-xs font-bold transition-all border border-slate-700"
+            title="Evaluate demand and scale VMs once"
+          >
+            {isAutoscaleBusy ? 'Autoscaling...' : 'Run Autoscale'}
+          </button>
+          <button
+            onClick={() => setAutoScaleEnabled((prev) => !prev)}
+            disabled={isExecuting}
+            className={`px-4 py-2 disabled:opacity-50 rounded-xl text-xs font-bold transition-all border ${
+              autoScaleEnabled
+                ? 'bg-emerald-600/20 border-emerald-500/30 text-emerald-300'
+                : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200'
+            }`}
+            title="Continuously evaluate demand and scale VMs"
+          >
+            Auto Mode: {autoScaleEnabled ? 'ON' : 'OFF'}
+          </button>
           {savedSession ? (
             <button
               onClick={loadSaved}
@@ -738,6 +843,93 @@ const WorkflowBuilder: React.FC = () => {
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm outline-none"
                   disabled={isExecuting}
                 />
+              </div>
+
+              <div className="pt-3 border-t border-slate-800 space-y-3">
+                <p className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Autoscaler</p>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Min VMs</label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={autoScaleConfig.minVms}
+                      onChange={(event) =>
+                        setAutoScaleConfig((prev) => ({
+                          ...prev,
+                          minVms: Math.max(0, Number(event.target.value) || 0),
+                        }))
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm outline-none"
+                      disabled={isExecuting}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Max VMs</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={autoScaleConfig.maxVms}
+                      onChange={(event) =>
+                        setAutoScaleConfig((prev) => ({
+                          ...prev,
+                          maxVms: Math.max(1, Number(event.target.value) || 1),
+                        }))
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm outline-none"
+                      disabled={isExecuting}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Jobs/VM</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={autoScaleConfig.jobsPerVm}
+                      onChange={(event) =>
+                        setAutoScaleConfig((prev) => ({
+                          ...prev,
+                          jobsPerVm: Math.max(1, Number(event.target.value) || 1),
+                        }))
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm outline-none"
+                      disabled={isExecuting}
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Interval (sec)</label>
+                    <input
+                      type="number"
+                      min={10}
+                      value={autoScaleConfig.intervalSec}
+                      onChange={(event) =>
+                        setAutoScaleConfig((prev) => ({
+                          ...prev,
+                          intervalSec: Math.max(10, Number(event.target.value) || 10),
+                        }))
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm outline-none"
+                      disabled={isExecuting}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Country</label>
+                    <select
+                      value={autoScaleConfig.country}
+                      onChange={(event) => setAutoScaleConfig((prev) => ({ ...prev, country: event.target.value }))}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm outline-none"
+                      disabled={isExecuting}
+                    >
+                      {COUNTRY_OPTIONS.map((option) => (
+                        <option key={option} value={option}>
+                          {option.toUpperCase()}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
               </div>
 
               <div className="pt-2 text-[11px] font-mono text-slate-400">

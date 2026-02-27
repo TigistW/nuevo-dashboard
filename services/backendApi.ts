@@ -117,6 +117,28 @@ export interface ApiJobEnqueueResponse {
   status: string;
 }
 
+export interface ApiAutoscaleRequest {
+  min_vms: number;
+  max_vms: number;
+  jobs_per_vm: number;
+  country: string;
+  ram: string;
+  cpu: string;
+  template_id: string;
+}
+
+export interface ApiAutoscaleDecision {
+  status: string;
+  action: string;
+  reason: string;
+  running_vms: number;
+  desired_vms: number;
+  active_jobs: number;
+  queued_jobs: number;
+  operation_id?: string | null;
+  affected_vm_id?: string | null;
+}
+
 export interface ApiTerminalCommandResponse {
   output: string;
 }
@@ -209,6 +231,10 @@ export function listSchedulerQueue(): Promise<ApiSchedulerTask[]> {
 
 export function enqueueSchedulerJob(payload: ApiSchedulerTask): Promise<ApiJobEnqueueResponse> {
   return requestJson<ApiJobEnqueueResponse>("/api/v1/automation/scheduler/jobs", "POST", payload);
+}
+
+export function autoscaleNow(payload: ApiAutoscaleRequest): Promise<ApiAutoscaleDecision> {
+  return requestJson<ApiAutoscaleDecision>("/api/v1/automation/scheduler/autoscale", "POST", payload);
 }
 
 export function terminalCommand(vmId: string, command: string): Promise<ApiTerminalCommandResponse> {

@@ -2,7 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
-from ..models import HealingRule, JobEnqueueResponse, Task
+from ..models import AutoscaleDecision, AutoscaleRequest, HealingRule, JobEnqueueResponse, Task
 from ..repositories import StorageRepository
 from ..services import AutomationService
 
@@ -30,6 +30,15 @@ async def create_job(
 @router.get("/scheduler/queue", response_model=list[Task])
 async def get_job_queue(service: AutomationService = Depends(get_service)):
     return service.get_job_queue()
+
+
+@router.post("/scheduler/autoscale", response_model=AutoscaleDecision)
+async def autoscale_now(
+    payload: AutoscaleRequest,
+    background_tasks: BackgroundTasks,
+    service: AutomationService = Depends(get_service),
+):
+    return service.evaluate_autoscale(payload, background_tasks)
 
 
 @router.post("/simulator/validate")

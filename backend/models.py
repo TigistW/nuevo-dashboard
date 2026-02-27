@@ -117,6 +117,28 @@ class JobEnqueueResponse(BaseModel):
     status: str
 
 
+class AutoscaleRequest(BaseModel):
+    min_vms: int = Field(default=1, ge=0, le=200)
+    max_vms: int = Field(default=6, gt=0, le=200)
+    jobs_per_vm: int = Field(default=2, gt=0, le=32)
+    country: str = Field(default="us", min_length=1, max_length=64)
+    ram: str = Field(default="256MB", min_length=1, max_length=32)
+    cpu: str = Field(default="1", min_length=1, max_length=32)
+    template_id: str = Field(default="t-001", min_length=1, max_length=64)
+
+
+class AutoscaleDecision(BaseModel):
+    status: str
+    action: str
+    reason: str
+    running_vms: int
+    desired_vms: int
+    active_jobs: int
+    queued_jobs: int
+    operation_id: str | None = None
+    affected_vm_id: str | None = None
+
+
 class SystemControlResponse(BaseModel):
     status: str
     action: str
