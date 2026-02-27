@@ -99,10 +99,12 @@ You can run this in two valid patterns.
 ### B) Multi-service pattern (parallel by country)
 
 - Define dedicated compose services (`proxy-us`, `proxy-de`, `proxy-ca`, ...), each mounted to its own `configs/<profile>.ovpn`.
+- You can also use suffixed services for multiple endpoints per country (`proxy-de-s20`, `proxy-de-s220`, ...).
 - Set:
   - `PROXY_SELECTION_MODE=auto` (or `service` if you want strict mode)
-  - `PROFILE_SERVICE_MAP=us=proxy-us,de=proxy-de,ca=proxy-ca`
-- In `auto` and `service` mode, API is strict: it must find a mapped service or `proxy-<profile>`; otherwise it returns `400`.
+  - Optional `PROFILE_SERVICE_MAP=us=proxy-us,de=proxy-de,ca=proxy-ca`
+- In `auto` mode resolution order is: `PROFILE_SERVICE_MAP` -> `proxy-<profile>` -> `proxy-<profile>-*` (random pick among matches).
+- In `service` mode it is strict: it must match one of those patterns; otherwise it returns `400`.
 
 ### Country mapping
 

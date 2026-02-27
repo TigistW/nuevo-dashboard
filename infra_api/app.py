@@ -213,12 +213,15 @@ def _proxy_compose(args: list[str], *, check: bool = True) -> subprocess.Complet
     )
 
 
-def _compose_service_exists(service_name: str) -> bool:
+def _compose_services() -> list[str]:
     result = _proxy_compose(["config", "--services"], check=False)
     if result.returncode != 0:
-        return False
-    services = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-    return service_name in services
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _compose_service_exists(service_name: str) -> bool:
+    return service_name in set(_compose_services())
 
 
 def _service_for_country(country: str) -> tuple[str, str]:
@@ -238,12 +241,16 @@ def _service_for_country(country: str) -> tuple[str, str]:
     if _compose_service_exists(candidate):
         return candidate, profile
 
+    suffixed_candidates = [name for name in _compose_services() if name.startswith(f"{candidate}-")]
+    if suffixed_candidates:
+        return random.choice(sorted(suffixed_candidates)), profile
+
     if mode in {"service", "auto"}:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"No compose service found for profile '{profile}'. "
-                "Add PROFILE_SERVICE_MAP/proxy-<profile> service or use PROXY_SELECTION_MODE=config."
+                "Add PROFILE_SERVICE_MAP, define proxy-<profile> or proxy-<profile>-* service, or use PROXY_SELECTION_MODE=config."
             ),
         )
 

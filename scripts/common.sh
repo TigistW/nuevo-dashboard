@@ -116,6 +116,11 @@ compose_service_exists() {
   proxy_compose config --services 2>/dev/null | grep -Fxq "$service_name"
 }
 
+compose_services_for_profile() {
+  local profile="$1"
+  proxy_compose config --services 2>/dev/null | grep -E "^proxy-${profile}-" || true
+}
+
 map_lookup() {
   local mapping="$1"
   local key="$2"
@@ -221,8 +226,20 @@ service_for_country() {
     return
   fi
 
+  local suffixed=()
+  local service_name=""
+  while IFS= read -r service_name; do
+    if [[ -n "$service_name" ]]; then
+      suffixed+=("$service_name")
+    fi
+  done < <(compose_services_for_profile "$profile")
+  if [[ "${#suffixed[@]}" -gt 0 ]]; then
+    echo "${suffixed[$((RANDOM % ${#suffixed[@]}))]}"
+    return
+  fi
+
   if [[ "$PROXY_SELECTION_MODE" == "service" || "$PROXY_SELECTION_MODE" == "auto" ]]; then
-    echo "No compose service found for profile '$profile'. Add PROFILE_SERVICE_MAP/proxy-$profile or use PROXY_SELECTION_MODE=config." >&2
+    echo "No compose service found for profile '$profile'. Add PROFILE_SERVICE_MAP, define proxy-$profile or proxy-$profile-*, or use PROXY_SELECTION_MODE=config." >&2
     exit 1
   fi
 
