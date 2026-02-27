@@ -27,6 +27,7 @@ class Settings:
     vm_api_delete_endpoint: str = os.getenv("VM_API_DELETE_ENDPOINT", "/v1/vms/delete")
     proxy_api_base_url: str = os.getenv("PROXY_API_BASE_URL", "")
     proxy_api_token: str = os.getenv("PROXY_API_TOKEN", "")
+    proxy_country_fallback_enabled: bool = _env_bool("PROXY_COUNTRY_FALLBACK_ENABLED", False)
     proxy_api_rotate_endpoint: str = os.getenv("PROXY_API_ROTATE_ENDPOINT", "/v1/proxy/rotate")
     proxy_api_register_endpoint: str = os.getenv("PROXY_API_REGISTER_ENDPOINT", "/v1/proxy/register")
     proxy_api_security_endpoint: str = os.getenv("PROXY_API_SECURITY_ENDPOINT", "/v1/proxy/security/snapshot")

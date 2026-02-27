@@ -377,7 +377,11 @@ class InfrastructureAdapter:
                     command_runs=[api_run],
                 )
             except Exception as exc:
-                if normalized_country not in {"us", "usa"} and self._is_proxy_country_config_error(exc):
+                if (
+                    settings.proxy_country_fallback_enabled
+                    and normalized_country not in {"us", "usa"}
+                    and self._is_proxy_country_config_error(exc)
+                ):
                     fallback_country = "us"
                     fallback_payload = {"vm_id": vm_id, "tunnel_id": tunnel_id, "country": fallback_country}
                     try:

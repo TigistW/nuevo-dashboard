@@ -158,7 +158,7 @@ country_to_profile() {
       if [[ -f "$MICROVM_PROXY_HOME/configs/$country_lower.ovpn" ]]; then
         echo "$country_lower"
       else
-        echo "us"
+        echo "$country_lower"
       fi
       ;;
   esac
@@ -207,8 +207,8 @@ service_for_country() {
     return
   fi
 
-  if [[ "$PROXY_SELECTION_MODE" == "service" ]]; then
-    echo "No compose service found for profile '$profile' in service mode." >&2
+  if [[ "$PROXY_SELECTION_MODE" == "service" || "$PROXY_SELECTION_MODE" == "auto" ]]; then
+    echo "No compose service found for profile '$profile'. Add PROFILE_SERVICE_MAP/proxy-$profile or use PROXY_SELECTION_MODE=config." >&2
     exit 1
   fi
 

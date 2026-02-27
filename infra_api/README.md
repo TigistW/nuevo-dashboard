@@ -98,7 +98,7 @@ You can run this in two valid patterns.
 - Set:
   - `PROXY_SELECTION_MODE=auto` (or `service` if you want strict mode)
   - `PROFILE_SERVICE_MAP=us=proxy-us,de=proxy-de,ca=proxy-ca`
-- In `auto` mode, API tries mapped service / `proxy-<profile>` first, then falls back to `PROXY_SERVICE_NAME`.
+- In `auto` and `service` mode, API is strict: it must find a mapped service or `proxy-<profile>`; otherwise it returns `400`.
 
 ### Country mapping
 

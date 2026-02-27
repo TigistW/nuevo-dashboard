@@ -520,7 +520,7 @@ def _run_vm_action_task(vm_id: str, operation_id: str, action: str) -> None:
             if tunnel_id:
                 tunnel = repo.get_tunnel(tunnel_id)
                 if tunnel is not None and tunnel.vm_id == vm.id:
-                    repo.update_tunnel(tunnel, vm_id=None, status="Disconnected")
+                    repo.update_tunnel(tunnel, vm_id=None, status="Disconnected", public_ip=None)
             repo.update_operation_status(operation_id, "succeeded", f"VM '{vm_id}' deleted.")
             summary = summarize_command_runs(command_runs)
             if summary:
