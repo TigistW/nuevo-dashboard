@@ -98,6 +98,42 @@ class OperationStatus(BaseModel):
     finished_at: str | None = None
 
 
+class VerificationRequest(BaseModel):
+    id: str
+    vm_id: str
+    worker_id: str
+    verification_type: str
+    status: str
+    provider: str
+    destination: str
+    retries: int
+    last_error: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class CaptchaEvent(BaseModel):
+    id: int
+    vm_id: str | None = None
+    provider: str
+    status: str
+    source: str
+    score: int | None = None
+    latency_ms: int
+    created_at: str
+    details: str | None = None
+
+
+class CaptchaSummary(BaseModel):
+    total: int
+    solved: int
+    failed: int
+    timeout: int
+    bypassed: int
+    success_rate: float
+    avg_latency_ms: int
+
+
 class Repository(BaseModel):
     id: str
     name: str

@@ -1,0 +1,566 @@
+{
+  "name": "Real API Lane - VM + IP + Verification + Job",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger-1",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "set-1",
+              "name": "backend_url",
+              "value": "={{ $env.BACKEND_URL || 'http://127.0.0.1:8000' }}",
+              "type": "string"
+            },
+            {
+              "id": "set-2",
+              "name": "vm_id",
+              "value": "={{ 'vm-' + Date.now() }}",
+              "type": "string"
+            },
+            {
+              "id": "set-3",
+              "name": "country",
+              "value": "de",
+              "type": "string"
+            },
+            {
+              "id": "set-4",
+              "name": "ram",
+              "value": "256MB",
+              "type": "string"
+            },
+            {
+              "id": "set-5",
+              "name": "cpu",
+              "value": "1",
+              "type": "string"
+            },
+            {
+              "id": "set-6",
+              "name": "template_id",
+              "value": "t-001",
+              "type": "string"
+            },
+            {
+              "id": "set-7",
+              "name": "task_type",
+              "value": "LoadTest",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-input-1",
+      "name": "Set Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.backend_url + '/api/v1/orchestrator/create' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"id\": $json.vm_id, \"country\": $json.country, \"ram\": $json.ram, \"cpu\": $json.cpu, \"template_id\": $json.template_id } }}",
+        "options": {}
+      },
+      "id": "http-create-vm-1",
+      "name": "HTTP Create VM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 3,
+        "unit": "seconds"
+      },
+      "id": "wait-vm-1",
+      "name": "Wait VM",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/orchestrator/list' }}",
+        "options": {}
+      },
+      "id": "http-list-vms-1",
+      "name": "HTTP List VMs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1140,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const vmId = $node['Set Input'].json.vm_id;\nconst list = Array.isArray($json) ? $json : (Array.isArray($json.data) ? $json.data : []);\nconst vm = list.find(item => item.id === vmId);\nconst status = vm ? String(vm.status || '').toLowerCase() : 'missing';\nreturn [{ json: { vm_id: vmId, vm_status: status } }];"
+      },
+      "id": "code-find-vm-1",
+      "name": "Find VM Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "if-vm-running-cond-1",
+              "leftValue": "={{ $json.vm_status }}",
+              "rightValue": "running",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-vm-running-1",
+      "name": "VM Running?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1580,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/network/tunnels/rotate/' + $node['Set Input'].json.vm_id }}",
+        "options": {}
+      },
+      "id": "http-rotate-ip-1",
+      "name": "HTTP Rotate IP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1800,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 3,
+        "unit": "seconds"
+      },
+      "id": "wait-rotate-1",
+      "name": "Wait Rotate",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2020,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/orchestrator/operations/' + $node['HTTP Rotate IP'].json.id }}",
+        "options": {}
+      },
+      "id": "http-get-rotate-op-1",
+      "name": "HTTP Get Rotate Operation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2240,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const status = String($json.status || '').toLowerCase();\nreturn [{\n  json: {\n    rotate_status: status,\n    rotate_terminal: ['succeeded', 'failed'].includes(status),\n    rotate_succeeded: status === 'succeeded'\n  }\n}];"
+      },
+      "id": "code-rotate-status-1",
+      "name": "Parse Rotate Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "if-rotate-terminal-cond-1",
+              "leftValue": "={{ $json.rotate_terminal }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-rotate-terminal-1",
+      "name": "Rotate Terminal?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2680,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "if-rotate-succeeded-cond-1",
+              "leftValue": "={{ $json.rotate_succeeded }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-rotate-succeeded-1",
+      "name": "Rotate Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2900,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/security/test-isolation?vm_id=' + encodeURIComponent($node['Set Input'].json.vm_id) }}",
+        "options": {}
+      },
+      "id": "http-test-isolation-1",
+      "name": "HTTP Test Isolation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3120,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "if-isolation-passed-cond-1",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "Passed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-isolation-passed-1",
+      "name": "Isolation Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3340,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/automation/scheduler/jobs' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"id\": 'job-' + Date.now(), \"task_type\": $node['Set Input'].json.task_type, \"vm_id\": $node['Set Input'].json.vm_id, \"status\": 'Queued', \"progress\": 0 } }}",
+        "options": {}
+      },
+      "id": "http-queue-job-1",
+      "name": "HTTP Queue Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3560,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/orchestrator/' + $node['Set Input'].json.vm_id }}",
+        "options": {}
+      },
+      "id": "http-delete-vm-1",
+      "name": "HTTP Delete VM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3560,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Input": {
+      "main": [
+        [
+          {
+            "node": "HTTP Create VM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Create VM": {
+      "main": [
+        [
+          {
+            "node": "Wait VM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait VM": {
+      "main": [
+        [
+          {
+            "node": "HTTP List VMs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP List VMs": {
+      "main": [
+        [
+          {
+            "node": "Find VM Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find VM Status": {
+      "main": [
+        [
+          {
+            "node": "VM Running?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VM Running?": {
+      "main": [
+        [
+          {
+            "node": "HTTP Rotate IP",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait VM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Rotate IP": {
+      "main": [
+        [
+          {
+            "node": "Wait Rotate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Rotate": {
+      "main": [
+        [
+          {
+            "node": "HTTP Get Rotate Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Get Rotate Operation": {
+      "main": [
+        [
+          {
+            "node": "Parse Rotate Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Rotate Status": {
+      "main": [
+        [
+          {
+            "node": "Rotate Terminal?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rotate Terminal?": {
+      "main": [
+        [
+          {
+            "node": "Rotate Succeeded?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait Rotate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rotate Succeeded?": {
+      "main": [
+        [
+          {
+            "node": "HTTP Test Isolation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Delete VM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Test Isolation": {
+      "main": [
+        [
+          {
+            "node": "Isolation Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Isolation Passed?": {
+      "main": [
+        [
+          {
+            "node": "HTTP Queue Job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Delete VM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "pinData": {}
+}

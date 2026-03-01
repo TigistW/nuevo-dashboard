@@ -8,6 +8,7 @@ from sqlalchemy import and_, desc, func, select
 from sqlalchemy.orm import Session
 
 from ..db_models import (
+    CaptchaEventEntity,
     GuardrailsEntity,
     HealingRuleEntity,
     IdentityEntity,
@@ -20,6 +21,7 @@ from ..db_models import (
     TelemetrySampleEntity,
     ThreatSampleEntity,
     TunnelEntity,
+    VerificationRequestEntity,
 )
 
 
@@ -311,6 +313,71 @@ class StorageRepository:
             stmt = stmt.where(SystemLogEntity.source == source)
         stmt = stmt.order_by(desc(SystemLogEntity.timestamp)).limit(limit)
         return list(self.db.scalars(stmt).all())
+
+    # Verification requests
+    def list_verification_requests(self, limit: int = 200) -> list[VerificationRequestEntity]:
+        stmt = select(VerificationRequestEntity).order_by(desc(VerificationRequestEntity.updated_at)).limit(limit)
+        return list(self.db.scalars(stmt).all())
+
+    def get_verification_request(self, request_id: str) -> VerificationRequestEntity | None:
+        return self.db.get(VerificationRequestEntity, request_id)
+
+    def create_verification_request(
+        self,
+        request_id: str,
+        vm_id: str,
+        worker_id: str,
+        verification_type: str,
+        status: str,
+        provider: str,
+        destination: str,
+        retries: int = 0,
+        last_error: str | None = None,
+    ) -> VerificationRequestEntity:
+        row = VerificationRequestEntity(
+            id=request_id,
+            vm_id=vm_id,
+            worker_id=worker_id,
+            verification_type=verification_type,
+            status=status,
+            provider=provider,
+            destination=destination,
+            retries=retries,
+            last_error=last_error,
+        )
+        return self._commit_refresh(row)
+
+    def update_verification_request(self, row: VerificationRequestEntity, **updates) -> VerificationRequestEntity:
+        for key, value in updates.items():
+            setattr(row, key, value)
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    # CAPTCHA events
+    def list_captcha_events(self, limit: int = 200) -> list[CaptchaEventEntity]:
+        stmt = select(CaptchaEventEntity).order_by(desc(CaptchaEventEntity.created_at)).limit(limit)
+        return list(self.db.scalars(stmt).all())
+
+    def create_captcha_event(
+        self,
+        provider: str,
+        status: str,
+        source: str,
+        vm_id: str | None = None,
+        score: int | None = None,
+        latency_ms: int = 0,
+        details: str | None = None,
+    ) -> CaptchaEventEntity:
+        row = CaptchaEventEntity(
+            vm_id=vm_id,
+            provider=provider,
+            status=status,
+            source=source,
+            score=score,
+            latency_ms=latency_ms,
+            details=details,
+        )
+        return self._commit_refresh(row)
 
     # Operations
     def create_operation(

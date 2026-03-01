@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import SessionLocal, init_db
-from .routers import orchestrator, network, security, intelligence, automation, governance, repository
+from .routers import orchestrator, network, security, intelligence, automation, governance, repository, verification
 from .services.bootstrap import seed_defaults
 
 app = FastAPI(
@@ -38,6 +38,7 @@ app.include_router(intelligence.router, prefix="/api/v1/intelligence", tags=["In
 app.include_router(automation.router, prefix="/api/v1/automation", tags=["Automation"])
 app.include_router(governance.router, prefix="/api/v1/governance", tags=["Governance"])
 app.include_router(repository.router, prefix="/api/v1/repository", tags=["Repository"])
+app.include_router(verification.router, prefix="/api/v1/verification", tags=["Verification"])
 
 @app.get("/")
 async def root():

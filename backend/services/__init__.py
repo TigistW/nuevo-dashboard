@@ -5,6 +5,7 @@ from .network import NetworkService
 from .orchestrator import OrchestratorService
 from .repository_service import RepositoryService
 from .security import SecurityService
+from .verification import VerificationService
 
 __all__ = [
     "AutomationService",
@@ -14,4 +15,5 @@ __all__ = [
     "OrchestratorService",
     "RepositoryService",
     "SecurityService",
+    "VerificationService",
 ]

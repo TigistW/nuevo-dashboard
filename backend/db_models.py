@@ -156,6 +156,38 @@ class OperationEntity(Base):
     )
 
 
+class VerificationRequestEntity(Base):
+    __tablename__ = "verification_requests"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    vm_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    worker_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    verification_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="Pending", nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    destination: Mapped[str] = mapped_column(String(128), nullable=False)
+    retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+
+class CaptchaEventEntity(Base):
+    __tablename__ = "captcha_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    vm_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
 class TelemetrySampleEntity(Base):
     __tablename__ = "telemetry_samples"
 

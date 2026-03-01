@@ -151,6 +151,42 @@ export interface ApiWorkflowExecutionResponse {
   operation_id: string;
 }
 
+export interface ApiVerificationRequest {
+  id: string;
+  vm_id: string;
+  worker_id: string;
+  verification_type: string;
+  status: string;
+  provider: string;
+  destination: string;
+  retries: number;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiCaptchaEvent {
+  id: number;
+  vm_id?: string | null;
+  provider: string;
+  status: string;
+  source: string;
+  score?: number | null;
+  latency_ms: number;
+  created_at: string;
+  details?: string | null;
+}
+
+export interface ApiCaptchaSummary {
+  total: number;
+  solved: number;
+  failed: number;
+  timeout: number;
+  bypassed: number;
+  success_rate: number;
+  avg_latency_ms: number;
+}
+
 export function listMicroVms(): Promise<ApiMicroVm[]> {
   return requestJson<ApiMicroVm[]>("/api/v1/orchestrator/list", "GET");
 }
@@ -248,4 +284,26 @@ export function terminalCommand(vmId: string, command: string): Promise<ApiTermi
 export function executeWorkflow(workflowId: string): Promise<ApiWorkflowExecutionResponse> {
   const query = new URLSearchParams({ workflow_id: workflowId });
   return requestJson<ApiWorkflowExecutionResponse>(`/api/v1/repository/workflows/execute?${query.toString()}`, "POST");
+}
+
+export function listVerificationRequests(limit: number = 100): Promise<ApiVerificationRequest[]> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  return requestJson<ApiVerificationRequest[]>(`/api/v1/verification/requests?${query.toString()}`, "GET");
+}
+
+export function retryVerificationRequest(requestId: string): Promise<ApiOperationStatus> {
+  return requestJson<ApiOperationStatus>(
+    `/api/v1/verification/requests/${encodeURIComponent(requestId)}/retry`,
+    "POST"
+  );
+}
+
+export function getCaptchaEvents(limit: number = 100): Promise<ApiCaptchaEvent[]> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  return requestJson<ApiCaptchaEvent[]>(`/api/v1/verification/captcha/events?${query.toString()}`, "GET");
+}
+
+export function getCaptchaSummary(hours: number = 24): Promise<ApiCaptchaSummary> {
+  const query = new URLSearchParams({ hours: String(hours) });
+  return requestJson<ApiCaptchaSummary>(`/api/v1/verification/captcha/summary?${query.toString()}`, "GET");
 }

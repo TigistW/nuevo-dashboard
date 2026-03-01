@@ -68,3 +68,65 @@ def seed_defaults(db: Session) -> None:
             ("20:00", 56),
         ]:
             repo.add_threat_sample(time_label=point[0], threats=point[1])
+
+    if not repo.list_verification_requests(limit=1):
+        repo.create_verification_request(
+            request_id="V-101",
+            vm_id="vm-001",
+            worker_id="W-001",
+            verification_type="SMS",
+            status="Pending",
+            provider="Twilio",
+            destination="+123456789",
+            retries=0,
+        )
+        repo.create_verification_request(
+            request_id="V-102",
+            vm_id="vm-002",
+            worker_id="W-002",
+            verification_type="QR",
+            status="Verified",
+            provider="Internal",
+            destination="qr-session-002",
+            retries=1,
+        )
+        repo.create_verification_request(
+            request_id="V-103",
+            vm_id="vm-003",
+            worker_id="W-003",
+            verification_type="SMS",
+            status="Failed",
+            provider="SmsPVA",
+            destination="+987654321",
+            retries=2,
+            last_error="Provider timeout while waiting for OTP.",
+        )
+
+    if not repo.list_captcha_events(limit=1):
+        repo.create_captcha_event(
+            vm_id="vm-001",
+            provider="google-recaptcha",
+            status="solved",
+            source="gmail-signup",
+            score=93,
+            latency_ms=3200,
+            details="Token solved via anti-bot flow.",
+        )
+        repo.create_captcha_event(
+            vm_id="vm-002",
+            provider="google-recaptcha",
+            status="failed",
+            source="gmail-signup",
+            score=58,
+            latency_ms=8700,
+            details="Challenge score below threshold.",
+        )
+        repo.create_captcha_event(
+            vm_id="vm-003",
+            provider="hcaptcha",
+            status="timeout",
+            source="account-maintenance",
+            score=67,
+            latency_ms=12000,
+            details="Timeout waiting for solver callback.",
+        )
