@@ -98,12 +98,8 @@ ok "n8n role is '${n8n_role}'."
 
 workflows_json="$(http_json GET '/api/v1/n8n/workflows')"
 workflow_exists="$(
-  python3 - "$WORKFLOW_ID" <<'PY' <<<"$workflows_json"
-import json, sys
-target = sys.argv[1]
-items = json.loads(sys.stdin.read() or "[]")
-print("1" if any(str(item.get("workflow_id")) == target for item in items) else "0")
-PY
+  python3 -c 'import json, sys; target = sys.argv[1]; items = json.loads(sys.stdin.read() or "[]"); print("1" if any(str(item.get("workflow_id")) == target for item in items) else "0")' \
+    "$WORKFLOW_ID" <<<"$workflows_json"
 )"
 [[ "$workflow_exists" == "1" ]] || fail "Workflow '${WORKFLOW_ID}' not found in /api/v1/n8n/workflows."
 ok "Workflow '${WORKFLOW_ID}' is registered."

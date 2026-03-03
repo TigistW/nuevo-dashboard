@@ -15,8 +15,10 @@ from ..models import (
     NotebookSession,
     NotebookSessionCreate,
     NotebookTickResult,
+    NotebookWorkerStatus,
 )
 from ..repositories import StorageRepository
+from .colab_worker import get_colab_worker
 from .utils import isoformat_or_none
 
 
@@ -44,6 +46,7 @@ class NotebookService:
             notebook_id=notebook_id,
             vm_id=vm.id,
             account_email=payload.account_email,
+            notebook_url=payload.notebook_url,
             status="Active",
             gpu_assigned_gb=float(payload.gpu_assigned_gb),
             gpu_usage_gb=gpu_usage,
@@ -52,6 +55,8 @@ class NotebookService:
             cycle_state="active",
             next_transition_at=now + timedelta(minutes=random.randint(4, 10)),
             session_expires_at=now + timedelta(hours=random.randint(5, 9), minutes=random.randint(0, 45)),
+            last_probe_at=None,
+            last_probe_message=None,
         )
         self.repo.add_log("Notebook", "INFO", f"Notebook session '{row.id}' created for VM '{vm.id}'.")
         return self._to_session(row)
@@ -176,11 +181,24 @@ class NotebookService:
             risk_delta=risk_delta,
         )
 
+    def get_worker_status(self) -> NotebookWorkerStatus:
+        return get_colab_worker().status()
+
+    def start_worker(self) -> NotebookWorkerStatus:
+        return get_colab_worker().start()
+
+    def stop_worker(self) -> NotebookWorkerStatus:
+        return get_colab_worker().stop()
+
+    def probe_worker_once(self) -> NotebookWorkerStatus:
+        return get_colab_worker().probe_once()
+
     def _to_session(self, row) -> NotebookSession:
         return NotebookSession(
             id=row.id,
             vm_id=row.vm_id,
             account_email=row.account_email,
+            notebook_url=row.notebook_url,
             status=row.status,
             gpu_assigned_gb=row.gpu_assigned_gb,
             gpu_usage_gb=row.gpu_usage_gb,
@@ -190,6 +208,8 @@ class NotebookService:
             next_transition_at=isoformat_or_none(row.next_transition_at),
             session_expires_at=isoformat_or_none(row.session_expires_at),
             warning_message=row.warning_message,
+            last_probe_at=isoformat_or_none(row.last_probe_at),
+            last_probe_message=row.last_probe_message,
             restart_count=row.restart_count,
             risk_score=row.risk_score,
             updated_at=isoformat_or_none(row.updated_at) or datetime.utcnow().isoformat(),

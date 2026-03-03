@@ -296,6 +296,7 @@ class NotebookSessionCreate(BaseModel):
     id: str | None = None
     vm_id: str
     account_email: str | None = None
+    notebook_url: str | None = None
     gpu_assigned_gb: float = Field(default=12.0, ge=1.0, le=96.0)
     timezone_offset_minutes: int = Field(default=0, ge=-720, le=840)
 
@@ -304,6 +305,7 @@ class NotebookSession(BaseModel):
     id: str
     vm_id: str
     account_email: str | None = None
+    notebook_url: str | None = None
     status: str
     gpu_assigned_gb: float
     gpu_usage_gb: float
@@ -313,9 +315,34 @@ class NotebookSession(BaseModel):
     next_transition_at: str | None = None
     session_expires_at: str | None = None
     warning_message: str | None = None
+    last_probe_at: str | None = None
+    last_probe_message: str | None = None
     restart_count: int
     risk_score: int
     updated_at: str
+
+
+class NotebookWorkerSessionStatus(BaseModel):
+    notebook_id: str
+    vm_id: str
+    account_email: str | None = None
+    notebook_url: str | None = None
+    current_url: str | None = None
+    state: str
+    last_probe_at: str | None = None
+    message: str | None = None
+    recovery_attempts: int = 0
+
+
+class NotebookWorkerStatus(BaseModel):
+    enabled: bool
+    running: bool
+    playwright_available: bool
+    poll_seconds: int
+    managed_sessions: int
+    last_tick_at: str | None = None
+    last_error: str | None = None
+    sessions: list[NotebookWorkerSessionStatus] = Field(default_factory=list)
 
 
 class NotebookDistributionRequest(BaseModel):

@@ -10,6 +10,7 @@ from ..models import (
     NotebookSession,
     NotebookSessionCreate,
     NotebookTickResult,
+    NotebookWorkerStatus,
 )
 from ..repositories import StorageRepository
 from ..services.notebook import NotebookService
@@ -48,3 +49,23 @@ async def notebook_event(
     service: NotebookService = Depends(get_service),
 ):
     return service.report_event(notebook_id=notebook_id, payload=payload)
+
+
+@router.get("/worker/status", response_model=NotebookWorkerStatus)
+async def worker_status(service: NotebookService = Depends(get_service)):
+    return service.get_worker_status()
+
+
+@router.post("/worker/start", response_model=NotebookWorkerStatus)
+async def worker_start(service: NotebookService = Depends(get_service)):
+    return service.start_worker()
+
+
+@router.post("/worker/stop", response_model=NotebookWorkerStatus)
+async def worker_stop(service: NotebookService = Depends(get_service)):
+    return service.stop_worker()
+
+
+@router.post("/worker/probe", response_model=NotebookWorkerStatus)
+async def worker_probe(service: NotebookService = Depends(get_service)):
+    return service.probe_worker_once()

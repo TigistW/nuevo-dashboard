@@ -165,6 +165,7 @@ def _run_sqlite_compat_migrations() -> None:
                     id TEXT PRIMARY KEY,
                     vm_id TEXT NOT NULL,
                     account_email TEXT NULL,
+                    notebook_url TEXT NULL,
                     status TEXT NOT NULL DEFAULT 'Active',
                     gpu_assigned_gb REAL NOT NULL DEFAULT 12.0,
                     gpu_usage_gb REAL NOT NULL DEFAULT 0.0,
@@ -174,6 +175,8 @@ def _run_sqlite_compat_migrations() -> None:
                     next_transition_at DATETIME NULL,
                     session_expires_at DATETIME NULL,
                     warning_message TEXT NULL,
+                    last_probe_at DATETIME NULL,
+                    last_probe_message TEXT NULL,
                     restart_count INTEGER NOT NULL DEFAULT 0,
                     risk_score INTEGER NOT NULL DEFAULT 0,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -292,6 +295,19 @@ def _run_sqlite_compat_migrations() -> None:
             vm_column_names = {str(column["name"]) for column in vm_columns}
             if "risk_score" not in vm_column_names:
                 conn.execute(text("ALTER TABLE micro_vms ADD COLUMN risk_score INTEGER NOT NULL DEFAULT 0"))
+
+        notebook_table_exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='notebook_sessions'")
+        ).first()
+        if notebook_table_exists:
+            notebook_columns = conn.execute(text("PRAGMA table_info('notebook_sessions')")).mappings().all()
+            notebook_column_names = {str(column["name"]) for column in notebook_columns}
+            if "notebook_url" not in notebook_column_names:
+                conn.execute(text("ALTER TABLE notebook_sessions ADD COLUMN notebook_url TEXT"))
+            if "last_probe_at" not in notebook_column_names:
+                conn.execute(text("ALTER TABLE notebook_sessions ADD COLUMN last_probe_at DATETIME"))
+            if "last_probe_message" not in notebook_column_names:
+                conn.execute(text("ALTER TABLE notebook_sessions ADD COLUMN last_probe_message TEXT"))
 
         table_exists = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduler_jobs'")

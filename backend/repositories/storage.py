@@ -601,6 +601,7 @@ class StorageRepository:
         notebook_id: str,
         vm_id: str,
         account_email: str | None,
+        notebook_url: str | None,
         status: str,
         gpu_assigned_gb: float,
         gpu_usage_gb: float,
@@ -610,6 +611,8 @@ class StorageRepository:
         next_transition_at: datetime | None,
         session_expires_at: datetime | None,
         warning_message: str | None = None,
+        last_probe_at: datetime | None = None,
+        last_probe_message: str | None = None,
         restart_count: int = 0,
         risk_score: int = 0,
     ) -> NotebookSessionEntity:
@@ -617,6 +620,7 @@ class StorageRepository:
             id=notebook_id,
             vm_id=vm_id,
             account_email=account_email,
+            notebook_url=notebook_url,
             status=status,
             gpu_assigned_gb=gpu_assigned_gb,
             gpu_usage_gb=gpu_usage_gb,
@@ -626,6 +630,8 @@ class StorageRepository:
             next_transition_at=next_transition_at,
             session_expires_at=session_expires_at,
             warning_message=warning_message,
+            last_probe_at=last_probe_at,
+            last_probe_message=last_probe_message,
             restart_count=restart_count,
             risk_score=risk_score,
         )

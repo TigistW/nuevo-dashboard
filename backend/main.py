@@ -23,6 +23,7 @@ from .routers import (
 )
 from .services.automation import start_scheduler_daemon
 from .services.bootstrap import seed_defaults
+from .services.colab_worker import start_colab_worker_daemon, stop_colab_worker_daemon
 
 app = FastAPI(
     title="Colab Farm Advanced Orchestrator API",
@@ -40,6 +41,12 @@ def startup_event() -> None:
     finally:
         db.close()
     start_scheduler_daemon()
+    start_colab_worker_daemon()
+
+
+@app.on_event("shutdown")
+def shutdown_event() -> None:
+    stop_colab_worker_daemon()
 
 # CORS configuration for frontend integration
 app.add_middleware(

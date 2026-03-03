@@ -157,6 +157,40 @@ class ExtendedFeatureIntegrationTest(unittest.TestCase):
         self.assertEqual(risk_resp.status_code, 200, risk_resp.text)
         self.assertEqual(risk_resp.json()["action"], "destroy_vm")
 
+    def test_notebook_worker_status_and_url_persistence(self) -> None:
+        with self.SessionLocal() as db:
+            repo = StorageRepository(db)
+            repo.create_vm(
+                vm_id="vm-notebook-worker-1",
+                country="us",
+                ram_mb=256,
+                cpu_cores=1,
+                template_id="t-001",
+                status="running",
+            )
+
+        create_nb = self.client.post(
+            "/api/v1/notebook/sessions",
+            json={
+                "id": "nb-worker-1",
+                "vm_id": "vm-notebook-worker-1",
+                "gpu_assigned_gb": 12.0,
+                "notebook_url": "https://colab.research.google.com/drive/mock-notebook-1",
+            },
+        )
+        self.assertEqual(create_nb.status_code, 200, create_nb.text)
+        created = create_nb.json()
+        self.assertEqual(created["notebook_url"], "https://colab.research.google.com/drive/mock-notebook-1")
+        self.assertIsNone(created["last_probe_at"])
+        self.assertIsNone(created["last_probe_message"])
+
+        worker_status = self.client.get("/api/v1/notebook/worker/status")
+        self.assertEqual(worker_status.status_code, 200, worker_status.text)
+        status_payload = worker_status.json()
+        self.assertIn("enabled", status_payload)
+        self.assertIn("running", status_payload)
+        self.assertIn("playwright_available", status_payload)
+
     def test_ip_policy_and_smtp_ephemeral_flow(self) -> None:
         bad_ip = "203.0.113.50"
         event_resp = self.client.post(

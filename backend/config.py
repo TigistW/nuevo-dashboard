@@ -57,6 +57,14 @@ class Settings:
     vm_delete_script: str = os.getenv("VM_DELETE_SCRIPT", "scripts/delete_vm.sh")
     tunnel_rotate_script: str = os.getenv("TUNNEL_ROTATE_SCRIPT", "scripts/rotate_tunnel.sh")
     tunnel_register_script: str = os.getenv("TUNNEL_REGISTER_SCRIPT", "scripts/register_tunnel.sh")
+    colab_worker_enabled: bool = _env_bool("COLAB_WORKER_ENABLED", True)
+    colab_worker_auto_start: bool = _env_bool("COLAB_WORKER_AUTO_START", False)
+    colab_worker_headless: bool = _env_bool("COLAB_WORKER_HEADLESS", True)
+    colab_worker_poll_seconds: int = int(os.getenv("COLAB_WORKER_POLL_SECONDS", "30"))
+    colab_worker_nav_timeout_ms: int = int(os.getenv("COLAB_WORKER_NAV_TIMEOUT_MS", "45000"))
+    colab_worker_action_timeout_ms: int = int(os.getenv("COLAB_WORKER_ACTION_TIMEOUT_MS", "4000"))
+    colab_worker_storage_state_dir: str = os.getenv("COLAB_WORKER_STORAGE_STATE_DIR", "./backend/.state/colab")
+    colab_worker_browser_channel: str = os.getenv("COLAB_WORKER_BROWSER_CHANNEL", "")
 
 
 settings = Settings()
