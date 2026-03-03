@@ -7,6 +7,7 @@ import {
   ApiIpHistoryRecord,
   ApiMicroVm,
   ApiNotebookSession,
+  ApiNotebookWorkerStatus,
   ApiSmtpTask,
   ApiTunnelBenchmarkResult,
   assignGoogleAccount,
@@ -24,7 +25,9 @@ import {
   listNotebookSessions,
   listSmtpTasks,
   listTunnelBenchmarkResults,
+  getNotebookWorkerStatus,
   planNotebookDistribution,
+  probeNotebookWorker,
   recordIpEvent,
   reportNotebookEvent,
   runTunnelBenchmark,
@@ -32,6 +35,8 @@ import {
   sendSmtpTask,
   setN8nRoleConfig,
   appendN8nRunEvent,
+  startNotebookWorker,
+  stopNotebookWorker,
   tickFootprint,
   tickNotebookSessions,
   updateN8nRunStatus,
@@ -62,6 +67,7 @@ const AdvancedOps: React.FC = () => {
   );
 
   const [notebooks, setNotebooks] = useState<ApiNotebookSession[]>([]);
+  const [workerStatus, setWorkerStatus] = useState<ApiNotebookWorkerStatus | null>(null);
   const [ipHistory, setIpHistory] = useState<ApiIpHistoryRecord[]>([]);
   const [smtpTasks, setSmtpTasks] = useState<ApiSmtpTask[]>([]);
   const [footprintActivities, setFootprintActivities] = useState<ApiFootprintActivity[]>([]);
@@ -75,6 +81,7 @@ const AdvancedOps: React.FC = () => {
 
   const [selectedVm, setSelectedVm] = useState<string>('');
   const [selectedAccount, setSelectedAccount] = useState<string>('');
+  const [notebookUrl, setNotebookUrl] = useState<string>('');
   const [checkIp, setCheckIp] = useState<string>('203.0.113.10');
   const [checkContext, setCheckContext] = useState<'google' | 'smtp'>('google');
   const [smtpDomain, setSmtpDomain] = useState<string>('example.org');
@@ -100,7 +107,9 @@ const AdvancedOps: React.FC = () => {
   const refreshByTab = useCallback(
     async (tab: TabKey) => {
       if (tab === 'notebook') {
-        setNotebooks(await listNotebookSessions());
+        const [sessions, worker] = await Promise.all([listNotebookSessions(), getNotebookWorkerStatus()]);
+        setNotebooks(sessions);
+        setWorkerStatus(worker);
       } else if (tab === 'ip') {
         setIpHistory(await listIpHistory(80));
       } else if (tab === 'smtp') {
@@ -229,7 +238,10 @@ const AdvancedOps: React.FC = () => {
                   if (!selectedVm) {
                     throw new Error('Select VM first.');
                   }
-                  await createNotebookSession({ vm_id: selectedVm });
+                  await createNotebookSession({
+                    vm_id: selectedVm,
+                    notebook_url: notebookUrl.trim() || undefined,
+                  });
                   if (selectedAccount) {
                     await assignGoogleAccount({ vm_id: selectedVm, account_id: selectedAccount });
                   }
@@ -270,6 +282,82 @@ const AdvancedOps: React.FC = () => {
               Plan 30GB
             </button>
           </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-slate-500 mb-1 uppercase">Notebook URL (for worker)</label>
+              <input
+                className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-xs"
+                placeholder="https://colab.research.google.com/drive/..."
+                value={notebookUrl}
+                onChange={(event) => setNotebookUrl(event.target.value)}
+              />
+            </div>
+            <div className="flex gap-2 items-end">
+              <button
+                onClick={() =>
+                  void safeRun(async () => {
+                    const status = await startNotebookWorker();
+                    setWorkerStatus(status);
+                    setInfoText(`Worker start requested. running=${String(status.running)}, playwright=${String(status.playwright_available)}`);
+                  })
+                }
+                disabled={isBusy}
+                className="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-xs font-bold text-white"
+              >
+                Start Worker
+              </button>
+              <button
+                onClick={() =>
+                  void safeRun(async () => {
+                    const status = await stopNotebookWorker();
+                    setWorkerStatus(status);
+                    setInfoText(`Worker stopped. running=${String(status.running)}`);
+                  })
+                }
+                disabled={isBusy}
+                className="px-3 py-2 bg-rose-700 hover:bg-rose-600 rounded text-xs font-bold text-white"
+              >
+                Stop Worker
+              </button>
+              <button
+                onClick={() =>
+                  void safeRun(async () => {
+                    const status = await probeNotebookWorker();
+                    setWorkerStatus(status);
+                    await refreshByTab('notebook');
+                    setInfoText('Worker probe executed once.');
+                  })
+                }
+                disabled={isBusy}
+                className="px-3 py-2 bg-indigo-700 hover:bg-indigo-600 rounded text-xs font-bold text-white"
+              >
+                Probe Once
+              </button>
+            </div>
+          </div>
+          <div className="bg-slate-900 border border-slate-800 rounded p-3 text-[11px] text-slate-300 font-mono">
+            {workerStatus ? (
+              <div className="space-y-1">
+                <p>
+                  worker: enabled={String(workerStatus.enabled)} running={String(workerStatus.running)} playwright={String(workerStatus.playwright_available)} poll={workerStatus.poll_seconds}s managed={workerStatus.managed_sessions}
+                </p>
+                <p>
+                  last_tick={workerStatus.last_tick_at || 'n/a'} error={workerStatus.last_error || 'none'}
+                </p>
+                {workerStatus.sessions.length > 0 ? (
+                  <div className="space-y-1">
+                    {workerStatus.sessions.map((item) => (
+                      <p key={item.notebook_id}>
+                        {item.notebook_id}: state={item.state}, current_url={item.current_url || 'n/a'}, probe={item.last_probe_at || 'n/a'}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <p>No worker status yet.</p>
+            )}
+          </div>
           <div className="space-y-2">
             {notebooks.map((session) => (
               <div key={session.id} className="bg-slate-900 border border-slate-800 rounded p-3 flex justify-between items-center">
@@ -277,6 +365,9 @@ const AdvancedOps: React.FC = () => {
                   <p className="text-sm font-semibold">{session.id} ({session.vm_id})</p>
                   <p className="text-[11px] text-slate-500">
                     status={session.status}, load={session.load_percent}%, gpu={session.gpu_usage_gb}/{session.gpu_assigned_gb}GB, risk={session.risk_score}
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    url={session.notebook_url || 'n/a'}, probe={session.last_probe_at || 'n/a'}, probe_msg={session.last_probe_message || 'n/a'}
                   </p>
                 </div>
                 <button

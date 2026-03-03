@@ -513,6 +513,7 @@ export interface ApiNotebookSession {
   id: string;
   vm_id: string;
   account_email?: string | null;
+  notebook_url?: string | null;
   status: string;
   gpu_assigned_gb: number;
   gpu_usage_gb: number;
@@ -522,6 +523,8 @@ export interface ApiNotebookSession {
   next_transition_at?: string | null;
   session_expires_at?: string | null;
   warning_message?: string | null;
+  last_probe_at?: string | null;
+  last_probe_message?: string | null;
   restart_count: number;
   risk_score: number;
   updated_at: string;
@@ -539,6 +542,29 @@ export interface ApiNotebookTickResult {
   rotated: number;
   resting: number;
   warnings: number;
+}
+
+export interface ApiNotebookWorkerSessionStatus {
+  notebook_id: string;
+  vm_id: string;
+  account_email?: string | null;
+  notebook_url?: string | null;
+  current_url?: string | null;
+  state: string;
+  last_probe_at?: string | null;
+  message?: string | null;
+  recovery_attempts: number;
+}
+
+export interface ApiNotebookWorkerStatus {
+  enabled: boolean;
+  running: boolean;
+  playwright_available: boolean;
+  poll_seconds: number;
+  managed_sessions: number;
+  last_tick_at?: string | null;
+  last_error?: string | null;
+  sessions: ApiNotebookWorkerSessionStatus[];
 }
 
 export interface ApiIpCandidateCheckResponse {
@@ -690,6 +716,7 @@ export function createNotebookSession(payload: {
   id?: string;
   vm_id: string;
   account_email?: string;
+  notebook_url?: string;
   gpu_assigned_gb?: number;
   timezone_offset_minutes?: number;
 }): Promise<ApiNotebookSession> {
@@ -718,6 +745,22 @@ export function reportNotebookEvent(
     "POST",
     payload
   );
+}
+
+export function getNotebookWorkerStatus(): Promise<ApiNotebookWorkerStatus> {
+  return requestJson<ApiNotebookWorkerStatus>("/api/v1/notebook/worker/status", "GET");
+}
+
+export function startNotebookWorker(): Promise<ApiNotebookWorkerStatus> {
+  return requestJson<ApiNotebookWorkerStatus>("/api/v1/notebook/worker/start", "POST");
+}
+
+export function stopNotebookWorker(): Promise<ApiNotebookWorkerStatus> {
+  return requestJson<ApiNotebookWorkerStatus>("/api/v1/notebook/worker/stop", "POST");
+}
+
+export function probeNotebookWorker(): Promise<ApiNotebookWorkerStatus> {
+  return requestJson<ApiNotebookWorkerStatus>("/api/v1/notebook/worker/probe", "POST");
 }
 
 export function evaluateIpCandidate(payload: {
