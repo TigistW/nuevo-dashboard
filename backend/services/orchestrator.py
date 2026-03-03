@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import random
+from datetime import datetime
 
 from fastapi import BackgroundTasks, HTTPException
 
 from ..config import settings
 from ..database import SessionLocal
-from ..models import MicroVMCreate, MicroVMResponse, OperationStatus
+from ..models import IpCandidateCheckRequest, IpUsageRecordCreate, MicroVMCreate, MicroVMResponse, OperationStatus
 from ..repositories import StorageRepository
 from .infra_adapter import InfrastructureAdapter, summarize_command_runs
+from .ip_policy import IpPolicyService
 from .utils import (
     cpu_to_text,
     generate_public_ip,
@@ -41,6 +43,22 @@ class OrchestratorService:
             message=f"Received VM create request for '{vm.id}'.",
             details=f"country={vm.country}, ram={vm.ram}, cpu={vm.cpu}, template={vm.template_id}",
         )
+        state = self.repo.get_system_control_state()
+        now = datetime.utcnow()
+        if state is not None and state.failsafe_active and (state.cooldown_until is None or state.cooldown_until > now):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Global failsafe is active. VM creation is temporarily paused."
+                    + (f" Cooldown until {state.cooldown_until.isoformat()}." if state.cooldown_until else "")
+                ),
+            )
+        if state is not None and state.protective_mode:
+            raise HTTPException(
+                status_code=503,
+                detail="Protective mode is active due to host pressure. VM creation is temporarily blocked.",
+            )
+
         existing = self.repo.get_vm(vm.id)
         if existing is not None and existing.status != "deleted":
             log_workflow_step(
@@ -245,6 +263,7 @@ class OrchestratorService:
             uptime=seconds_to_uptime(vm.uptime_seconds),
             exit_node=vm.exit_node,
             verification_status=vm.verification_status,
+            risk_score=int(getattr(vm, "risk_score", 0) or 0),
         )
 
     def _to_operation_response(self, operation) -> OperationStatus:
@@ -394,6 +413,23 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
             verification_status=verification_status,
             uptime_seconds=0,
         )
+        ip_policy = IpPolicyService(repo)
+        check = ip_policy.evaluate_candidate(
+            IpCandidateCheckRequest(ip=vm_public_ip, context="google", cooldown_minutes=120)
+        )
+        if not check.recommended:
+            fallback_ip = ip_policy.choose_ip_for_context(context="google", seed=vm.id)
+            repo.add_log(
+                "Orchestrator",
+                "WARNING",
+                f"Primary IP failed pre-creation filters for VM {vm.id}; fallback applied.",
+                f"primary={vm_public_ip}, fallback={fallback_ip}",
+            )
+            vm_public_ip = fallback_ip
+            repo.update_vm(vm, public_ip=vm_public_ip, verification_status="Warning")
+            repo.update_tunnel(tunnel, public_ip=vm_public_ip)
+            verification_status = "Warning"
+            trust_score = min(trust_score, 85)
         repo.upsert_identity(
             vm_id=vm.id,
             public_ip=vm_public_ip,
@@ -404,6 +440,14 @@ def _run_vm_create_task(vm_id: str, operation_id: str) -> None:
             city=None,
             status=identity_status,
             trust_score=trust_score,
+        )
+        ip_policy.record_usage(
+            IpUsageRecordCreate(
+                ip=vm_public_ip,
+                associated_vm_id=vm.id,
+                smtp_used=False,
+                last_event="vm_create",
+            )
         )
         infra_summary = summarize_command_runs(infra_result.command_runs)
         if infra_summary:

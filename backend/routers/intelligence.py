@@ -25,3 +25,18 @@ async def get_telemetry_history(service: IntelligenceService = Depends(get_servi
 @router.get("/logs/centralized")
 async def get_centralized_logs(source: str = "All", service: IntelligenceService = Depends(get_service)):
     return service.get_centralized_logs(source=source)
+
+
+@router.get("/control/state")
+async def get_protection_state(service: IntelligenceService = Depends(get_service)):
+    return service.get_protection_state()
+
+
+@router.post("/control/evaluate")
+async def evaluate_protection(apply: bool = True, service: IntelligenceService = Depends(get_service)):
+    return service.evaluate_protection(apply=apply)
+
+
+@router.post("/control/reset")
+async def reset_protection_state(service: IntelligenceService = Depends(get_service)):
+    return service.reset_protection_state()

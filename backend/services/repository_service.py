@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from uuid import uuid4
 from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, HTTPException
@@ -135,6 +137,27 @@ class RepositoryService:
         if not workflow_id:
             raise HTTPException(status_code=400, detail="workflow_id cannot be empty.")
 
+        n8n_run_id: str | None = None
+        n8n_workflow = self.repo.get_n8n_workflow(workflow_id)
+        n8n_role = self.repo.get_n8n_role()
+        if n8n_workflow is not None and (n8n_role is None or n8n_role.role != "eliminated"):
+            n8n_run_id = f"n8n-run-{uuid4().hex[:12]}"
+            self.repo.create_n8n_run(
+                run_id=n8n_run_id,
+                workflow_id=workflow_id,
+                trigger="repository_execute",
+                status="running",
+                context_json=json.dumps({"entrypoint": "repository.execute_workflow"}),
+                started_at=datetime.utcnow(),
+                last_message="Run accepted by repository endpoint.",
+            )
+            self.repo.add_log(
+                "n8n",
+                "INFO",
+                f"n8n run '{n8n_run_id}' linked to workflow execution.",
+                f"workflow_id={workflow_id}",
+            )
+
         operation = self.repo.create_operation(
             resource_type="workflow",
             resource_id=workflow_id,
@@ -143,7 +166,7 @@ class RepositoryService:
             message=f"Workflow '{workflow_id}' queued.",
         )
         self.repo.add_log("Workflow", "INFO", f"Workflow execution requested: {workflow_id}")
-        background_tasks.add_task(_run_workflow_task, workflow_id, operation.id)
+        background_tasks.add_task(_run_workflow_task, workflow_id, operation.id, n8n_run_id)
         return WorkflowExecutionResponse(
             status="started",
             workflow_id=workflow_id,
@@ -152,18 +175,61 @@ class RepositoryService:
         )
 
 
-def _run_workflow_task(workflow_id: str, operation_id: str) -> None:
+def _run_workflow_task(workflow_id: str, operation_id: str, n8n_run_id: str | None = None) -> None:
     db = SessionLocal()
     repo = StorageRepository(db)
     try:
         repo.update_operation_status(operation_id, "running", f"Workflow '{workflow_id}' started.")
+        if n8n_run_id:
+            n8n_run = repo.get_n8n_run(n8n_run_id)
+            if n8n_run is not None:
+                repo.append_n8n_run_event(
+                    n8n_run,
+                    {
+                        "at": datetime.utcnow().isoformat(),
+                        "phase": "dispatch",
+                        "status": "running",
+                        "message": "Repository workflow dispatcher started execution.",
+                        "details": None,
+                    },
+                )
         repo.update_operation_status(operation_id, "succeeded", f"Workflow '{workflow_id}' completed.")
+        if n8n_run_id:
+            n8n_run = repo.get_n8n_run(n8n_run_id)
+            if n8n_run is not None:
+                repo.update_n8n_run(
+                    n8n_run,
+                    status="succeeded",
+                    finished_at=datetime.utcnow(),
+                    last_message="Run completed from repository workflow dispatcher.",
+                )
+                n8n_run = repo.get_n8n_run(n8n_run_id)
+                if n8n_run is not None:
+                    repo.append_n8n_run_event(
+                        n8n_run,
+                        {
+                            "at": datetime.utcnow().isoformat(),
+                            "phase": "completed",
+                            "status": "succeeded",
+                            "message": "Repository workflow dispatcher completed execution.",
+                            "details": None,
+                        },
+                    )
         repo.add_log("Workflow", "INFO", f"Workflow completed: {workflow_id}")
     except Exception as exc:
         try:
             repo.update_operation_status(operation_id, "failed", str(exc))
         except Exception:
             pass
+        if n8n_run_id:
+            run = repo.get_n8n_run(n8n_run_id)
+            if run is not None:
+                repo.update_n8n_run(
+                    run,
+                    status="failed",
+                    finished_at=datetime.utcnow(),
+                    last_message=str(exc),
+                )
         repo.add_log("Workflow", "ERROR", f"Workflow failed: {workflow_id}", str(exc))
     finally:
         db.close()

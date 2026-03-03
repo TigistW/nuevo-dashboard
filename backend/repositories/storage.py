@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import Iterable
 from uuid import uuid4
@@ -8,18 +9,29 @@ from sqlalchemy import and_, desc, func, select
 from sqlalchemy.orm import Session
 
 from ..db_models import (
+    AccountModeEntity,
     CaptchaEventEntity,
+    FootprintActivityEntity,
     GuardrailsEntity,
+    GoogleAccountEntity,
     HealingRuleEntity,
     IdentityEntity,
+    IpHistoryEntity,
     MicroVMEntity,
+    N8nRoleEntity,
+    N8nRunEntity,
+    N8nWorkflowEntity,
+    NotebookSessionEntity,
     OperationEntity,
     RepositoryEntity,
     SchedulerJobEntity,
+    SMTPTaskEntity,
+    SystemControlStateEntity,
     SystemLogEntity,
     TemplateEntity,
     TelemetrySampleEntity,
     ThreatSampleEntity,
+    TunnelBenchmarkEntity,
     TunnelEntity,
     VerificationRequestEntity,
 )
@@ -198,6 +210,11 @@ class StorageRepository:
         rule = HealingRuleEntity(id=rule_id, trigger=trigger, action=action, enabled=enabled)
         return self._commit_refresh(rule)
 
+    def update_healing_rule(self, rule: HealingRuleEntity, enabled: bool) -> HealingRuleEntity:
+        rule.enabled = bool(enabled)
+        rule.updated_at = datetime.utcnow()
+        return self._commit_refresh(rule)
+
     # Templates
     def list_templates(self) -> list[TemplateEntity]:
         stmt = select(TemplateEntity).order_by(TemplateEntity.created_at.desc())
@@ -239,6 +256,34 @@ class StorageRepository:
         guardrails.updated_at = datetime.utcnow()
         return self._commit_refresh(guardrails)
 
+    # System control state
+    def get_system_control_state(self) -> SystemControlStateEntity | None:
+        return self.db.get(SystemControlStateEntity, 1)
+
+    def upsert_system_control_state(
+        self,
+        protective_mode: bool,
+        failsafe_active: bool,
+        cooldown_until: datetime | None = None,
+        last_reason: str | None = None,
+    ) -> SystemControlStateEntity:
+        state = self.get_system_control_state()
+        if state is None:
+            state = SystemControlStateEntity(
+                id=1,
+                protective_mode=protective_mode,
+                failsafe_active=failsafe_active,
+                cooldown_until=cooldown_until,
+                last_reason=last_reason,
+            )
+            return self._commit_refresh(state)
+        state.protective_mode = protective_mode
+        state.failsafe_active = failsafe_active
+        state.cooldown_until = cooldown_until
+        state.last_reason = last_reason
+        state.updated_at = datetime.utcnow()
+        return self._commit_refresh(state)
+
     # Scheduler jobs
     def create_scheduler_job(
         self,
@@ -247,6 +292,15 @@ class StorageRepository:
         vm_id: str | None,
         status: str = "Queued",
         progress: int = 0,
+        priority: str = "medium",
+        max_retries: int = 3,
+        next_attempt_at: datetime | None = None,
+        dead_letter: bool = False,
+        schedule_window_start_hour: int | None = None,
+        schedule_window_end_hour: int | None = None,
+        timezone_offset_minutes: int = 0,
+        jitter_seconds: int = 0,
+        recurrence_minutes: int | None = None,
     ) -> SchedulerJobEntity:
         job = SchedulerJobEntity(
             id=job_id,
@@ -254,6 +308,15 @@ class StorageRepository:
             vm_id=vm_id,
             status=status,
             progress=progress,
+            priority=priority,
+            max_retries=max_retries,
+            next_attempt_at=next_attempt_at,
+            dead_letter=dead_letter,
+            schedule_window_start_hour=schedule_window_start_hour,
+            schedule_window_end_hour=schedule_window_end_hour,
+            timezone_offset_minutes=timezone_offset_minutes,
+            jitter_seconds=jitter_seconds,
+            recurrence_minutes=recurrence_minutes,
         )
         return self._commit_refresh(job)
 
@@ -263,6 +326,28 @@ class StorageRepository:
     def list_scheduler_jobs(self) -> list[SchedulerJobEntity]:
         stmt = select(SchedulerJobEntity).order_by(SchedulerJobEntity.created_at.desc())
         return list(self.db.scalars(stmt).all())
+
+    def list_dispatchable_scheduler_jobs(self, now: datetime, limit: int) -> list[SchedulerJobEntity]:
+        candidates = self.db.scalars(
+            select(SchedulerJobEntity).where(
+                and_(
+                    SchedulerJobEntity.status.in_(["Queued", "Retrying"]),
+                    SchedulerJobEntity.dead_letter.is_(False),
+                )
+            )
+        ).all()
+        ready = [
+            job
+            for job in candidates
+            if job.next_attempt_at is None or job.next_attempt_at <= now
+        ]
+        priority_rank = {"high": 0, "medium": 1, "low": 2}
+        ready.sort(key=lambda job: (priority_rank.get((job.priority or "medium").lower(), 1), job.created_at))
+        return list(ready[: max(0, limit)])
+
+    def count_scheduler_jobs_by_status(self, statuses: Iterable[str]) -> int:
+        stmt = select(func.count()).select_from(SchedulerJobEntity).where(SchedulerJobEntity.status.in_(list(statuses)))
+        return int(self.db.scalar(stmt) or 0)
 
     def update_scheduler_job(self, job: SchedulerJobEntity, **updates) -> SchedulerJobEntity:
         for key, value in updates.items():
@@ -509,3 +594,400 @@ class StorageRepository:
             )
         )
         return int(self.db.scalar(stmt) or 0)
+
+    # Notebook sessions
+    def create_notebook_session(
+        self,
+        notebook_id: str,
+        vm_id: str,
+        account_email: str | None,
+        status: str,
+        gpu_assigned_gb: float,
+        gpu_usage_gb: float,
+        ram_usage_gb: float,
+        load_percent: int,
+        cycle_state: str,
+        next_transition_at: datetime | None,
+        session_expires_at: datetime | None,
+        warning_message: str | None = None,
+        restart_count: int = 0,
+        risk_score: int = 0,
+    ) -> NotebookSessionEntity:
+        row = NotebookSessionEntity(
+            id=notebook_id,
+            vm_id=vm_id,
+            account_email=account_email,
+            status=status,
+            gpu_assigned_gb=gpu_assigned_gb,
+            gpu_usage_gb=gpu_usage_gb,
+            ram_usage_gb=ram_usage_gb,
+            load_percent=load_percent,
+            cycle_state=cycle_state,
+            next_transition_at=next_transition_at,
+            session_expires_at=session_expires_at,
+            warning_message=warning_message,
+            restart_count=restart_count,
+            risk_score=risk_score,
+        )
+        return self._commit_refresh(row)
+
+    def get_notebook_session(self, notebook_id: str) -> NotebookSessionEntity | None:
+        return self.db.get(NotebookSessionEntity, notebook_id)
+
+    def list_notebook_sessions(self, vm_id: str | None = None) -> list[NotebookSessionEntity]:
+        stmt = select(NotebookSessionEntity).order_by(NotebookSessionEntity.updated_at.desc())
+        if vm_id:
+            stmt = stmt.where(NotebookSessionEntity.vm_id == vm_id)
+        return list(self.db.scalars(stmt).all())
+
+    def update_notebook_session(self, row: NotebookSessionEntity, **updates) -> NotebookSessionEntity:
+        for key, value in updates.items():
+            setattr(row, key, value)
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    # Google account management
+    def create_google_account(
+        self,
+        account_id: str,
+        email: str,
+        status: str = "free",
+        vm_id: str | None = None,
+        risk_score: int = 0,
+        warmup_state: str = "idle",
+        last_used_at: datetime | None = None,
+    ) -> GoogleAccountEntity:
+        row = GoogleAccountEntity(
+            id=account_id,
+            email=email,
+            status=status,
+            vm_id=vm_id,
+            risk_score=risk_score,
+            warmup_state=warmup_state,
+            last_used_at=last_used_at,
+        )
+        return self._commit_refresh(row)
+
+    def get_google_account(self, account_id: str) -> GoogleAccountEntity | None:
+        return self.db.get(GoogleAccountEntity, account_id)
+
+    def get_google_account_by_email(self, email: str) -> GoogleAccountEntity | None:
+        stmt = select(GoogleAccountEntity).where(GoogleAccountEntity.email == email)
+        return self.db.scalar(stmt)
+
+    def list_google_accounts(self) -> list[GoogleAccountEntity]:
+        stmt = select(GoogleAccountEntity).order_by(GoogleAccountEntity.updated_at.desc())
+        return list(self.db.scalars(stmt).all())
+
+    def find_assigned_account_by_vm(self, vm_id: str) -> GoogleAccountEntity | None:
+        stmt = select(GoogleAccountEntity).where(GoogleAccountEntity.vm_id == vm_id)
+        return self.db.scalar(stmt)
+
+    def update_google_account(self, row: GoogleAccountEntity, **updates) -> GoogleAccountEntity:
+        for key, value in updates.items():
+            setattr(row, key, value)
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    def get_account_mode(self) -> AccountModeEntity | None:
+        return self.db.get(AccountModeEntity, 1)
+
+    def upsert_account_mode(self, mode: str) -> AccountModeEntity:
+        row = self.get_account_mode()
+        if row is None:
+            row = AccountModeEntity(id=1, mode=mode)
+            return self._commit_refresh(row)
+        row.mode = mode
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    # Tunnel benchmarking
+    def create_tunnel_benchmark(
+        self,
+        protocol: str,
+        latency_ms: int,
+        stability_score: int,
+        persistence_score: int,
+        detection_score: int,
+        throughput_mbps: float,
+        notes: str | None = None,
+    ) -> TunnelBenchmarkEntity:
+        row = TunnelBenchmarkEntity(
+            protocol=protocol,
+            latency_ms=latency_ms,
+            stability_score=stability_score,
+            persistence_score=persistence_score,
+            detection_score=detection_score,
+            throughput_mbps=throughput_mbps,
+            notes=notes,
+        )
+        return self._commit_refresh(row)
+
+    def list_tunnel_benchmarks(self, protocol: str | None = None, limit: int = 200) -> list[TunnelBenchmarkEntity]:
+        stmt = select(TunnelBenchmarkEntity)
+        if protocol:
+            stmt = stmt.where(TunnelBenchmarkEntity.protocol == protocol)
+        stmt = stmt.order_by(desc(TunnelBenchmarkEntity.created_at)).limit(limit)
+        return list(self.db.scalars(stmt).all())
+
+    # IP history and reputation
+    def get_ip_history(self, ip: str) -> IpHistoryEntity | None:
+        stmt = select(IpHistoryEntity).where(IpHistoryEntity.ip == ip)
+        return self.db.scalar(stmt)
+
+    def list_ip_history(self, limit: int = 300) -> list[IpHistoryEntity]:
+        stmt = select(IpHistoryEntity).order_by(desc(IpHistoryEntity.updated_at)).limit(limit)
+        return list(self.db.scalars(stmt).all())
+
+    def upsert_ip_history(
+        self,
+        ip: str,
+        account_email: str | None = None,
+        associated_vm_id: str | None = None,
+        smtp_used: bool | None = None,
+        reputation_score: int | None = None,
+        negative_events: int | None = None,
+        restricted: bool | None = None,
+        discarded: bool | None = None,
+        last_event: str | None = None,
+        last_used_at: datetime | None = None,
+    ) -> IpHistoryEntity:
+        row = self.get_ip_history(ip)
+        if row is None:
+            row = IpHistoryEntity(
+                ip=ip,
+                account_email=account_email,
+                associated_vm_id=associated_vm_id,
+                smtp_used=bool(smtp_used) if smtp_used is not None else False,
+                reputation_score=int(reputation_score if reputation_score is not None else 100),
+                negative_events=int(negative_events if negative_events is not None else 0),
+                restricted=bool(restricted) if restricted is not None else False,
+                discarded=bool(discarded) if discarded is not None else False,
+                last_event=last_event,
+                last_used_at=last_used_at or datetime.utcnow(),
+            )
+            return self._commit_refresh(row)
+        if account_email is not None:
+            row.account_email = account_email
+        if associated_vm_id is not None:
+            row.associated_vm_id = associated_vm_id
+        if smtp_used is not None:
+            row.smtp_used = bool(smtp_used)
+        if reputation_score is not None:
+            row.reputation_score = int(reputation_score)
+        if negative_events is not None:
+            row.negative_events = int(negative_events)
+        if restricted is not None:
+            row.restricted = bool(restricted)
+        if discarded is not None:
+            row.discarded = bool(discarded)
+        if last_event is not None:
+            row.last_event = last_event
+        row.last_used_at = last_used_at or datetime.utcnow()
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    # Digital footprint
+    def create_footprint_activity(
+        self,
+        activity_id: str,
+        vm_id: str,
+        account_id: str | None,
+        activity_type: str,
+        status: str = "Scheduled",
+        details: str | None = None,
+        timezone_offset_minutes: int = 0,
+        scheduled_at: datetime | None = None,
+        executed_at: datetime | None = None,
+    ) -> FootprintActivityEntity:
+        row = FootprintActivityEntity(
+            id=activity_id,
+            vm_id=vm_id,
+            account_id=account_id,
+            activity_type=activity_type,
+            status=status,
+            details=details,
+            timezone_offset_minutes=timezone_offset_minutes,
+            scheduled_at=scheduled_at,
+            executed_at=executed_at,
+        )
+        return self._commit_refresh(row)
+
+    def get_footprint_activity(self, activity_id: str) -> FootprintActivityEntity | None:
+        return self.db.get(FootprintActivityEntity, activity_id)
+
+    def list_footprint_activities(
+        self,
+        limit: int = 200,
+        vm_id: str | None = None,
+        status: str | None = None,
+    ) -> list[FootprintActivityEntity]:
+        stmt = select(FootprintActivityEntity)
+        if vm_id is not None:
+            stmt = stmt.where(FootprintActivityEntity.vm_id == vm_id)
+        if status is not None:
+            stmt = stmt.where(FootprintActivityEntity.status == status)
+        stmt = stmt.order_by(desc(FootprintActivityEntity.created_at)).limit(limit)
+        return list(self.db.scalars(stmt).all())
+
+    def update_footprint_activity(self, row: FootprintActivityEntity, **updates) -> FootprintActivityEntity:
+        for key, value in updates.items():
+            setattr(row, key, value)
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    # SMTP tasks
+    def create_smtp_task(
+        self,
+        task_id: str,
+        implementation: str,
+        domain: str,
+        sender: str,
+        recipients_count: int,
+        status: str = "Queued",
+        vm_id: str | None = None,
+    ) -> SMTPTaskEntity:
+        row = SMTPTaskEntity(
+            id=task_id,
+            implementation=implementation,
+            domain=domain,
+            sender=sender,
+            recipients_count=recipients_count,
+            status=status,
+            vm_id=vm_id,
+        )
+        return self._commit_refresh(row)
+
+    def get_smtp_task(self, task_id: str) -> SMTPTaskEntity | None:
+        return self.db.get(SMTPTaskEntity, task_id)
+
+    def list_smtp_tasks(self, limit: int = 200) -> list[SMTPTaskEntity]:
+        stmt = select(SMTPTaskEntity).order_by(desc(SMTPTaskEntity.created_at)).limit(limit)
+        return list(self.db.scalars(stmt).all())
+
+    def update_smtp_task(self, row: SMTPTaskEntity, **updates) -> SMTPTaskEntity:
+        for key, value in updates.items():
+            setattr(row, key, value)
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    # Architecture role
+    def get_n8n_role(self) -> N8nRoleEntity | None:
+        return self.db.get(N8nRoleEntity, 1)
+
+    def upsert_n8n_role(self, role: str, notes: str | None = None) -> N8nRoleEntity:
+        row = self.get_n8n_role()
+        if row is None:
+            row = N8nRoleEntity(id=1, role=role, notes=notes)
+            return self._commit_refresh(row)
+        row.role = role
+        row.notes = notes
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    # n8n workflows
+    def get_n8n_workflow(self, workflow_id: str) -> N8nWorkflowEntity | None:
+        return self.db.get(N8nWorkflowEntity, workflow_id)
+
+    def list_n8n_workflows(self) -> list[N8nWorkflowEntity]:
+        stmt = select(N8nWorkflowEntity).order_by(N8nWorkflowEntity.updated_at.desc())
+        return list(self.db.scalars(stmt).all())
+
+    def upsert_n8n_workflow(
+        self,
+        workflow_id: str,
+        name: str,
+        source: str,
+        active: bool,
+        version_hash: str,
+        definition_json: str,
+    ) -> N8nWorkflowEntity:
+        row = self.get_n8n_workflow(workflow_id)
+        if row is None:
+            row = N8nWorkflowEntity(
+                id=workflow_id,
+                name=name,
+                source=source,
+                active=active,
+                version_hash=version_hash,
+                definition_json=definition_json,
+            )
+            return self._commit_refresh(row)
+        row.name = name
+        row.source = source
+        row.active = bool(active)
+        row.version_hash = version_hash
+        row.definition_json = definition_json
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    # n8n runs
+    def get_n8n_run(self, run_id: str) -> N8nRunEntity | None:
+        return self.db.get(N8nRunEntity, run_id)
+
+    def list_n8n_runs(self, limit: int = 200, workflow_id: str | None = None) -> list[N8nRunEntity]:
+        stmt = select(N8nRunEntity)
+        if workflow_id is not None:
+            stmt = stmt.where(N8nRunEntity.workflow_id == workflow_id)
+        stmt = stmt.order_by(desc(N8nRunEntity.updated_at)).limit(limit)
+        return list(self.db.scalars(stmt).all())
+
+    def create_n8n_run(
+        self,
+        run_id: str,
+        workflow_id: str,
+        trigger: str,
+        status: str,
+        context_json: str,
+        external_execution_id: str | None = None,
+        events_json: str = "[]",
+        last_message: str | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+    ) -> N8nRunEntity:
+        row = N8nRunEntity(
+            id=run_id,
+            workflow_id=workflow_id,
+            external_execution_id=external_execution_id,
+            trigger=trigger,
+            status=status,
+            context_json=context_json,
+            events_json=events_json,
+            last_message=last_message,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        return self._commit_refresh(row)
+
+    def update_n8n_run(self, row: N8nRunEntity, **updates) -> N8nRunEntity:
+        for key, value in updates.items():
+            setattr(row, key, value)
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    def append_n8n_run_event(self, row: N8nRunEntity, event: dict, max_events: int = 400) -> N8nRunEntity:
+        try:
+            events = json.loads(row.events_json or "[]")
+            if not isinstance(events, list):
+                events = []
+        except Exception:
+            events = []
+        events.append(event)
+        if max_events > 0 and len(events) > max_events:
+            events = events[-max_events:]
+        row.events_json = json.dumps(events, separators=(",", ":"), ensure_ascii=True)
+        row.last_message = str(event.get("message") or row.last_message or "")
+        row.updated_at = datetime.utcnow()
+        return self._commit_refresh(row)
+
+    # VM risk score
+    def apply_vm_risk_event(self, vm_id: str, delta: int, reason: str | None = None) -> MicroVMEntity | None:
+        vm = self.get_vm(vm_id)
+        if vm is None:
+            return None
+        vm.risk_score = max(0, int(vm.risk_score or 0) + int(delta))
+        vm.updated_at = datetime.utcnow()
+        updated = self._commit_refresh(vm)
+        if reason:
+            self.add_log("Risk", "WARNING" if delta > 0 else "INFO", f"VM {vm_id} risk adjusted by {delta}.", reason)
+        return updated

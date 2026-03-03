@@ -1,4 +1,7 @@
+import hashlib
+import json
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -14,6 +17,14 @@ def seed_defaults(db: Session) -> None:
             min_host_ram_mb=2048,
             max_cpu_per_vm=2,
             overload_prevention=True,
+        )
+
+    if repo.get_system_control_state() is None:
+        repo.upsert_system_control_state(
+            protective_mode=False,
+            failsafe_active=False,
+            cooldown_until=None,
+            last_reason=None,
         )
 
     if repo.get_template("t-001") is None:
@@ -130,3 +141,34 @@ def seed_defaults(db: Session) -> None:
             latency_ms=12000,
             details="Timeout waiting for solver callback.",
         )
+
+    if repo.get_account_mode() is None:
+        repo.upsert_account_mode("one_to_one")
+
+    if repo.get_n8n_role() is None:
+        repo.upsert_n8n_role("secondary_automation", notes="n8n acts as secondary automation layer.")
+
+    n8n_workflow_id = "real-api-lane"
+    if repo.get_n8n_workflow(n8n_workflow_id) is None:
+        definition = {}
+        workflow_file = (Path(__file__).resolve().parents[2] / "n8n" / "real_api_lane_workflow.json").resolve()
+        if workflow_file.exists():
+            try:
+                definition = json.loads(workflow_file.read_text(encoding="utf-8"))
+            except Exception:
+                definition = {}
+        definition_json = json.dumps(definition, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        version_hash = hashlib.sha256(definition_json.encode("utf-8")).hexdigest()
+        repo.upsert_n8n_workflow(
+            workflow_id=n8n_workflow_id,
+            name="Real API Lane - VM + IP + Verification + CAPTCHA + Job",
+            source="bundled",
+            active=False,
+            version_hash=version_hash,
+            definition_json=definition_json,
+        )
+
+    if not repo.list_google_accounts():
+        repo.create_google_account(account_id="acc-001", email="alpha.worker@example.com")
+        repo.create_google_account(account_id="acc-002", email="beta.worker@example.com")
+        repo.create_google_account(account_id="acc-003", email="gamma.worker@example.com")

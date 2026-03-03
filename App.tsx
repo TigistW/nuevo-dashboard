@@ -24,6 +24,7 @@ import DeploymentSimulator from './pages/DeploymentSimulator';
 import RepositoryManager from './pages/RepositoryManager';
 import TerminalConsole from './pages/TerminalConsole';
 import WorkflowBuilder from './pages/WorkflowBuilder';
+import AdvancedOps from './pages/AdvancedOps';
 import SecurityShield from './pages/SecurityShield';
 import VerificationCenter from './pages/VerificationCenter';
 import SystemIntelligence from './components/SystemIntelligence';
@@ -101,6 +102,7 @@ const App: React.FC = () => {
     { 
       title: t('governance'), 
       items: [
+        { label: 'Advanced Ops', path: '/advanced-ops', icon: '🧠' },
         { label: t('accounts'), path: '/accounts', icon: '🔐' },
         { label: t('simulator'), path: '/simulator', icon: '🧪' },
       ]
@@ -235,6 +237,7 @@ const App: React.FC = () => {
               <Route path="/templates" element={<TemplateManager />} />
               <Route path="/telemetry" element={<Telemetry />} />
               <Route path="/workflows" element={<WorkflowBuilder />} />
+              <Route path="/advanced-ops" element={<AdvancedOps />} />
               <Route path="/fingerprint" element={<FingerprintManager />} />
               <Route path="/scheduler" element={<TaskScheduler />} />
               <Route path="/guardrails" element={<ResourceGuardrails />} />

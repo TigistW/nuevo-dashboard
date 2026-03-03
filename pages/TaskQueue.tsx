@@ -1,21 +1,31 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from '../App';
 import { TaskType } from '../types';
-import { ApiSchedulerTask, enqueueSchedulerJob, listSchedulerQueue } from '../services/backendApi';
+import {
+  ApiSchedulerConfig,
+  ApiSchedulerTask,
+  enqueueSchedulerJob,
+  getSchedulerConfig,
+  listSchedulerQueue,
+} from '../services/backendApi';
 
 type NewTaskForm = {
   id: string;
   taskType: string;
   vmId: string;
+  priority: 'high' | 'medium' | 'low';
+  maxRetries: number;
 };
 
 const DEFAULT_FORM: NewTaskForm = {
   id: '',
   taskType: TaskType.STABLE_DIFFUSION,
   vmId: '',
+  priority: 'medium',
+  maxRetries: 3,
 };
 
-const STATUS_TABS = ['Queued', 'Running', 'Completed', 'Failed', 'ALL'] as const;
+const STATUS_TABS = ['Queued', 'Dispatching', 'Running', 'Retrying', 'Paused', 'Completed', 'Failed', 'DeadLetter', 'ALL'] as const;
 
 type StatusTab = (typeof STATUS_TABS)[number];
 
@@ -29,12 +39,14 @@ const TaskQueue: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorText, setErrorText] = useState<string>('');
   const [infoText, setInfoText] = useState<string>('');
+  const [schedulerConfig, setSchedulerConfig] = useState<ApiSchedulerConfig | null>(null);
 
   const refreshQueue = useCallback(async () => {
     setIsLoading(true);
     try {
-      const queue = await listSchedulerQueue();
+      const [queue, config] = await Promise.all([listSchedulerQueue(), getSchedulerConfig()]);
       setTasks(queue);
+      setSchedulerConfig(config);
       setErrorText('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load task queue.';
@@ -63,7 +75,9 @@ const TaskQueue: React.FC = () => {
           task_type: newTask.taskType,
           vm_id: newTask.vmId.trim() || null,
           status: 'Queued',
+          priority: newTask.priority,
           progress: 0,
+          max_retries: newTask.maxRetries,
         });
         setInfoText(`Task '${id}' queued.`);
         setErrorText('');
@@ -120,6 +134,13 @@ const TaskQueue: React.FC = () => {
         </div>
       </div>
 
+      {schedulerConfig ? (
+        <div className="px-4 py-3 rounded-xl border border-slate-700 bg-slate-800/50 text-sm text-slate-300">
+          Queue config: concurrency={schedulerConfig.concurrency_limit}, backoff={schedulerConfig.backoff_base_seconds}s,
+          default max retries={schedulerConfig.default_max_retries}
+        </div>
+      ) : null}
+
       {errorText ? (
         <div className="px-4 py-3 rounded-xl border border-rose-500/20 bg-rose-900/20 text-rose-300 text-sm">{errorText}</div>
       ) : null}
@@ -150,7 +171,12 @@ const TaskQueue: React.FC = () => {
                 </span>
               </div>
               <p className="text-slate-400 text-sm">{task.task_type}</p>
+              <p className="text-slate-500 text-xs">
+                Priority: {(task.priority || 'medium').toUpperCase()} | Max retries: {task.max_retries ?? 0}
+              </p>
               {(task.retry_count || 0) > 0 ? <p className="text-amber-400 text-xs">Retry count: {task.retry_count}</p> : null}
+              {task.next_attempt_at ? <p className="text-cyan-400 text-xs">Next attempt: {new Date(task.next_attempt_at).toLocaleString()}</p> : null}
+              {task.dead_letter ? <p className="text-rose-300 text-xs font-bold">Dead-letter isolated</p> : null}
               {task.error_message ? (
                 <p className="text-rose-400 text-xs truncate" title={task.error_message}>
                   {task.error_message}
@@ -221,6 +247,36 @@ const TaskQueue: React.FC = () => {
                   value={newTask.vmId}
                   onChange={(event) => setNewTask((prev) => ({ ...prev, vmId: event.target.value }))}
                   placeholder="vm1"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Priority</label>
+                <select
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 outline-none focus:ring-1 focus:ring-emerald-500"
+                  value={newTask.priority}
+                  onChange={(event) =>
+                    setNewTask((prev) => ({ ...prev, priority: event.target.value as NewTaskForm['priority'] }))
+                  }
+                >
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Max Retries</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={20}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 outline-none focus:ring-1 focus:ring-emerald-500"
+                  value={newTask.maxRetries}
+                  onChange={(event) =>
+                    setNewTask((prev) => ({
+                      ...prev,
+                      maxRetries: Math.max(0, Math.min(20, Number(event.target.value || 0))),
+                    }))
+                  }
                 />
               </div>
               <div className="flex gap-4 mt-8">

@@ -4,6 +4,8 @@ import {
   ApiCaptchaEvent,
   ApiCaptchaSummary,
   ApiVerificationRequest,
+  createCaptchaEvent,
+  createVerificationRequest,
   getCaptchaEvents,
   getCaptchaSummary,
   getOperation,
@@ -27,6 +29,36 @@ const VerificationCenter: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorText, setErrorText] = useState<string>('');
   const [retryingId, setRetryingId] = useState<string>('');
+  const [creatingVerification, setCreatingVerification] = useState<boolean>(false);
+  const [creatingCaptcha, setCreatingCaptcha] = useState<boolean>(false);
+  const [newVerification, setNewVerification] = useState<{
+    vm_id: string;
+    worker_id: string;
+    verification_type: 'SMS' | 'QR';
+    provider: string;
+    destination: string;
+  }>({
+    vm_id: 'vm-n8n-001',
+    worker_id: 'worker-vm-n8n-001',
+    verification_type: 'SMS',
+    provider: 'SmsPVA',
+    destination: '+15550001111',
+  });
+  const [newCaptcha, setNewCaptcha] = useState<{
+    vm_id: string;
+    provider: string;
+    status: 'solved' | 'failed' | 'timeout' | 'bypassed';
+    source: string;
+    latency_ms: number;
+    details: string;
+  }>({
+    vm_id: '',
+    provider: 'google-recaptcha',
+    status: 'solved',
+    source: 'dashboard-manual',
+    latency_ms: 1200,
+    details: 'manual event',
+  });
 
   const refreshData = useCallback(async () => {
     setIsLoading(true);
@@ -84,6 +116,56 @@ const VerificationCenter: React.FC = () => {
     [refreshData]
   );
 
+  const handleCreateVerification = useCallback(
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      setCreatingVerification(true);
+      try {
+        await createVerificationRequest({
+          vm_id: newVerification.vm_id.trim(),
+          worker_id: newVerification.worker_id.trim(),
+          verification_type: newVerification.verification_type,
+          status: 'Pending',
+          provider: newVerification.provider.trim(),
+          destination: newVerification.destination.trim(),
+        });
+        setErrorText('');
+        await refreshData();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to create verification request.';
+        setErrorText(message);
+      } finally {
+        setCreatingVerification(false);
+      }
+    },
+    [newVerification, refreshData]
+  );
+
+  const handleCreateCaptcha = useCallback(
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      setCreatingCaptcha(true);
+      try {
+        await createCaptchaEvent({
+          vm_id: newCaptcha.vm_id.trim() || undefined,
+          provider: newCaptcha.provider.trim(),
+          status: newCaptcha.status,
+          source: newCaptcha.source.trim(),
+          latency_ms: newCaptcha.latency_ms,
+          details: newCaptcha.details.trim() || undefined,
+        });
+        setErrorText('');
+        await refreshData();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to create CAPTCHA event.';
+        setErrorText(message);
+      } finally {
+        setCreatingCaptcha(false);
+      }
+    },
+    [newCaptcha, refreshData]
+  );
+
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
       <div className="flex justify-between items-center">
@@ -107,6 +189,115 @@ const VerificationCenter: React.FC = () => {
       {errorText ? (
         <div className="px-4 py-3 rounded-xl border border-rose-500/20 bg-rose-900/20 text-rose-300 text-sm">{errorText}</div>
       ) : null}
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <form onSubmit={handleCreateVerification} className="bg-[#0d1225] border border-slate-800 rounded-2xl p-5 space-y-3">
+          <h3 className="text-sm font-black uppercase tracking-widest text-emerald-400">Create SMS/QR Request</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <input
+              className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+              placeholder="VM ID"
+              value={newVerification.vm_id}
+              onChange={(event) => setNewVerification((prev) => ({ ...prev, vm_id: event.target.value }))}
+            />
+            <input
+              className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+              placeholder="Worker ID"
+              value={newVerification.worker_id}
+              onChange={(event) => setNewVerification((prev) => ({ ...prev, worker_id: event.target.value }))}
+            />
+            <select
+              className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+              value={newVerification.verification_type}
+              onChange={(event) =>
+                setNewVerification((prev) => ({ ...prev, verification_type: event.target.value as 'SMS' | 'QR' }))
+              }
+            >
+              <option value="SMS">SMS</option>
+              <option value="QR">QR</option>
+            </select>
+            <input
+              className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+              placeholder="Provider"
+              value={newVerification.provider}
+              onChange={(event) => setNewVerification((prev) => ({ ...prev, provider: event.target.value }))}
+            />
+          </div>
+          <input
+            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+            placeholder="Destination (phone or QR session)"
+            value={newVerification.destination}
+            onChange={(event) => setNewVerification((prev) => ({ ...prev, destination: event.target.value }))}
+          />
+          <button
+            type="submit"
+            disabled={creatingVerification}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 rounded-lg text-xs font-bold text-white"
+          >
+            {creatingVerification ? 'Creating...' : 'Create Verification Request'}
+          </button>
+        </form>
+
+        <form onSubmit={handleCreateCaptcha} className="bg-[#0d1225] border border-slate-800 rounded-2xl p-5 space-y-3">
+          <h3 className="text-sm font-black uppercase tracking-widest text-blue-400">Create CAPTCHA Event</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <input
+              className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+              placeholder="VM ID (optional)"
+              value={newCaptcha.vm_id}
+              onChange={(event) => setNewCaptcha((prev) => ({ ...prev, vm_id: event.target.value }))}
+            />
+            <input
+              className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+              placeholder="Provider"
+              value={newCaptcha.provider}
+              onChange={(event) => setNewCaptcha((prev) => ({ ...prev, provider: event.target.value }))}
+            />
+            <select
+              className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+              value={newCaptcha.status}
+              onChange={(event) =>
+                setNewCaptcha((prev) => ({
+                  ...prev,
+                  status: event.target.value as 'solved' | 'failed' | 'timeout' | 'bypassed',
+                }))
+              }
+            >
+              <option value="solved">solved</option>
+              <option value="failed">failed</option>
+              <option value="timeout">timeout</option>
+              <option value="bypassed">bypassed</option>
+            </select>
+            <input
+              type="number"
+              min={0}
+              className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+              placeholder="Latency ms"
+              value={newCaptcha.latency_ms}
+              onChange={(event) => setNewCaptcha((prev) => ({ ...prev, latency_ms: Number(event.target.value || 0) }))}
+            />
+          </div>
+          <input
+            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+            placeholder="Source"
+            value={newCaptcha.source}
+            onChange={(event) => setNewCaptcha((prev) => ({ ...prev, source: event.target.value }))}
+          />
+          <input
+            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
+            placeholder="Details (optional)"
+            value={newCaptcha.details}
+            onChange={(event) => setNewCaptcha((prev) => ({ ...prev, details: event.target.value }))}
+          />
+          <button
+            type="submit"
+            disabled={creatingCaptcha}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 rounded-lg text-xs font-bold text-white"
+          >
+            {creatingCaptcha ? 'Creating...' : 'Create CAPTCHA Event'}
+          </button>
+        </form>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-[#0d1225] border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">

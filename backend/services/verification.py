@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from fastapi import BackgroundTasks, HTTPException
 
 from ..database import SessionLocal
-from ..models import CaptchaEvent, CaptchaSummary, OperationStatus, VerificationRequest
+from ..models import (
+    CaptchaEvent,
+    CaptchaEventCreate,
+    CaptchaSummary,
+    OperationStatus,
+    VerificationRequest,
+    VerificationRequestCreate,
+)
 from ..repositories import StorageRepository
 from .utils import isoformat_or_none
 from .workflow_logging import log_workflow_step
@@ -14,6 +22,35 @@ from .workflow_logging import log_workflow_step
 class VerificationService:
     def __init__(self, repo: StorageRepository):
         self.repo = repo
+
+    def create_request(self, payload: VerificationRequestCreate) -> VerificationRequest:
+        request_id = (payload.id or f"V-{uuid4().hex[:8].upper()}").strip()
+        if not request_id:
+            raise HTTPException(status_code=400, detail="Verification request id cannot be empty.")
+        if self.repo.get_verification_request(request_id) is not None:
+            raise HTTPException(status_code=409, detail=f"Verification request '{request_id}' already exists.")
+
+        verification_type = (payload.verification_type or "SMS").strip().upper()
+        if verification_type not in {"SMS", "QR"}:
+            verification_type = "SMS"
+
+        status = (payload.status or "Pending").strip().title()
+        if status not in {"Pending", "Verified", "Failed"}:
+            status = "Pending"
+
+        row = self.repo.create_verification_request(
+            request_id=request_id,
+            vm_id=payload.vm_id.strip(),
+            worker_id=payload.worker_id.strip(),
+            verification_type=verification_type,
+            status=status,
+            provider=payload.provider.strip(),
+            destination=payload.destination.strip(),
+            retries=0,
+            last_error=None,
+        )
+        self.repo.add_log("Verification", "INFO", f"Verification request created: {request_id}")
+        return self._to_request(row)
 
     def list_requests(self, limit: int = 100) -> list[VerificationRequest]:
         rows = self.repo.list_verification_requests(limit=max(1, min(limit, 500)))
@@ -51,6 +88,45 @@ class VerificationService:
     def list_captcha_events(self, limit: int = 100) -> list[CaptchaEvent]:
         rows = self.repo.list_captcha_events(limit=max(1, min(limit, 500)))
         return [self._to_captcha_event(item) for item in rows]
+
+    def create_captcha_event(self, payload: CaptchaEventCreate) -> CaptchaEvent:
+        status = (payload.status or "").strip().lower()
+        if status not in {"solved", "failed", "timeout", "bypassed"}:
+            raise HTTPException(status_code=400, detail="Invalid captcha status.")
+
+        row = self.repo.create_captcha_event(
+            vm_id=payload.vm_id,
+            provider=payload.provider.strip(),
+            status=status,
+            source=payload.source.strip(),
+            score=payload.score,
+            latency_ms=max(0, int(payload.latency_ms)),
+            details=payload.details,
+        )
+        if payload.vm_id:
+            if status in {"failed", "timeout"}:
+                updated_vm = self.repo.apply_vm_risk_event(payload.vm_id, 3, reason=f"captcha_{status}")
+            elif status == "bypassed":
+                updated_vm = self.repo.apply_vm_risk_event(payload.vm_id, 1, reason="captcha_bypassed")
+            else:
+                updated_vm = self.repo.apply_vm_risk_event(payload.vm_id, -1, reason="captcha_solved")
+            if updated_vm is not None and int(updated_vm.risk_score or 0) >= 10 and updated_vm.status != "deleted":
+                self.repo.update_vm(updated_vm, status="deleted", verification_status="Warning")
+                self.repo.create_operation(
+                    resource_type="vm",
+                    resource_id=updated_vm.id,
+                    operation="delete",
+                    status="succeeded",
+                    message="Preventive destroy by CAPTCHA risk threshold.",
+                )
+                self.repo.add_log(
+                    "Verification",
+                    "ERROR",
+                    f"VM '{updated_vm.id}' destroyed due to CAPTCHA risk score.",
+                    f"risk_score={updated_vm.risk_score}",
+                )
+        self.repo.add_log("Verification", "INFO", f"CAPTCHA event recorded: id={row.id}, status={row.status}")
+        return self._to_captcha_event(row)
 
     def get_captcha_summary(self, hours: int = 24) -> CaptchaSummary:
         bounded_hours = max(1, min(hours, 720))

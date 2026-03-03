@@ -5,9 +5,10 @@ import random
 from fastapi import BackgroundTasks, HTTPException
 
 from ..database import SessionLocal
-from ..models import IdentityResponse, OperationStatus, TunnelResponse
+from ..models import IdentityResponse, IpUsageRecordCreate, OperationStatus, TunnelResponse
 from ..repositories import StorageRepository
 from .infra_adapter import InfrastructureAdapter, summarize_command_runs
+from .ip_policy import IpPolicyService
 from .utils import (
     estimate_latency_ms,
     isoformat_or_none,
@@ -236,6 +237,14 @@ def _run_rotation_task(vm_id: str, tunnel_id: str, operation_id: str) -> None:
             city=None,
             status="Secure",
             trust_score=95,
+        )
+        IpPolicyService(repo).record_usage(
+            IpUsageRecordCreate(
+                ip=new_ip,
+                associated_vm_id=vm.id,
+                smtp_used=False,
+                last_event="tunnel_rotate",
+            )
         )
 
         repo.update_operation_status(operation_id, "succeeded", f"Tunnel {tunnel.id} rotated for VM {vm.id}.")

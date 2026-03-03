@@ -1,103 +1,261 @@
-
-import React, { useState } from 'react';
-import { useTranslation } from '../App';
-
-interface Job {
-  id: string;
-  task: string;
-  vm: string;
-  status: 'Queued' | 'Running' | 'Completed' | 'Failed';
-  progress: number;
-}
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  ApiSchedulerConfig,
+  ApiSchedulerTask,
+  ApiSchedulerTickResult,
+  getSchedulerConfig,
+  listSchedulerQueue,
+  tickFootprint,
+  tickNotebookSessions,
+  triggerSchedulerTick,
+} from '../services/backendApi';
 
 const TaskScheduler: React.FC = () => {
-  const { t } = useTranslation();
-  const [jobs] = useState<Job[]>([
-    { id: 'job-101', task: 'LLM Inference Batch', vm: 'vm-001', status: 'Running', progress: 65 },
-    { id: 'job-102', task: 'Stable Diffusion Latent', vm: 'vm-002', status: 'Queued', progress: 0 },
-    { id: 'job-103', task: 'Data ETL Process', vm: 'vm-003', status: 'Completed', progress: 100 },
-  ]);
+  const [config, setConfig] = useState<ApiSchedulerConfig | null>(null);
+  const [tasks, setTasks] = useState<ApiSchedulerTask[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isBusy, setIsBusy] = useState<boolean>(false);
+  const [schedulerTickResult, setSchedulerTickResult] = useState<ApiSchedulerTickResult | null>(null);
+  const [notebookTickResult, setNotebookTickResult] = useState<string>('');
+  const [footprintTickResult, setFootprintTickResult] = useState<string>('');
+  const [errorText, setErrorText] = useState<string>('');
+  const [infoText, setInfoText] = useState<string>('');
+
+  const refresh = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const [cfg, queue] = await Promise.all([getSchedulerConfig(), listSchedulerQueue()]);
+      setConfig(cfg);
+      setTasks(queue);
+      setErrorText('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load scheduler state.';
+      setErrorText(message);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const interval = window.setInterval(() => {
+      void refresh();
+    }, 6000);
+    return () => window.clearInterval(interval);
+  }, [refresh]);
+
+  const taskCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const task of tasks) {
+      const key = String(task.status || 'Unknown');
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    return counts;
+  }, [tasks]);
+
+  const runSchedulerTick = useCallback(async () => {
+    setIsBusy(true);
+    try {
+      const result = await triggerSchedulerTick();
+      setSchedulerTickResult(result);
+      setInfoText(
+        `Scheduler tick done: dispatched=${result.dispatched}, warmup=${result.warmup_jobs_enqueued}, queued=${result.queued_jobs}, active=${result.active_jobs}.`
+      );
+      setErrorText('');
+      await refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Scheduler tick failed.';
+      setErrorText(message);
+    } finally {
+      setIsBusy(false);
+    }
+  }, [refresh]);
+
+  const runNotebookTick = useCallback(async () => {
+    setIsBusy(true);
+    try {
+      const result = await tickNotebookSessions();
+      const text = `updated=${result.updated}, rotated=${result.rotated}, resting=${result.resting}, warnings=${result.warnings}`;
+      setNotebookTickResult(text);
+      setInfoText(`Notebook care tick: ${text}`);
+      setErrorText('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Notebook tick failed.';
+      setErrorText(message);
+    } finally {
+      setIsBusy(false);
+    }
+  }, []);
+
+  const runFootprintTick = useCallback(async () => {
+    setIsBusy(true);
+    try {
+      const result = await tickFootprint();
+      const text = `scheduled=${result.scheduled}, executed=${result.executed}`;
+      setFootprintTickResult(text);
+      setInfoText(`Footprint tick: ${text}`);
+      setErrorText('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Footprint tick failed.';
+      setErrorText(message);
+    } finally {
+      setIsBusy(false);
+    }
+  }, []);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
       <div className="flex justify-between items-center">
         <div>
-          <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('taskScheduler')}</h2>
-          <p className="text-sm text-slate-500 font-mono">Distributed Job Queue & Load Balancing</p>
+          <h2 className="text-2xl font-black italic tracking-tighter uppercase">Task Scheduler</h2>
+          <p className="text-sm text-slate-500 font-mono">Queue, autonomous ticks, and warm-up orchestration</p>
         </div>
-        <button className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-emerald-600/20 transition-all">
-          + New Job
+        <button
+          onClick={() => void refresh()}
+          disabled={isBusy}
+          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded-xl text-xs font-bold transition-all border border-slate-700"
+        >
+          Refresh
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 space-y-6">
-          <div className="bg-[#0d1225] border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
-            <div className="p-6 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center">
-              <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">{t('jobQueue')}</h3>
-              <span className="text-[10px] font-mono text-slate-500">Total: {jobs.length}</span>
-            </div>
-            <div className="divide-y divide-slate-800">
-              {jobs.map((job) => (
-                <div key={job.id} className="p-6 hover:bg-slate-800/30 transition-colors">
-                  <div className="flex justify-between items-start mb-4">
-                    <div>
-                      <h4 className="text-sm font-bold text-slate-200">{job.task}</h4>
-                      <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">ID: {job.id} // Target: {job.vm}</p>
-                    </div>
-                    <span className={`px-2 py-1 rounded text-[9px] font-black uppercase tracking-widest ${
-                      job.status === 'Running' ? 'bg-blue-500/10 text-blue-500 border border-blue-500/20' :
-                      job.status === 'Completed' ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' :
-                      'bg-slate-800 text-slate-500 border border-slate-700'
-                    }`}>
-                      {job.status}
-                    </span>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-[9px] font-bold uppercase text-slate-500">
-                      <span>Progress</span>
-                      <span>{job.progress}%</span>
-                    </div>
-                    <div className="h-1.5 w-full bg-slate-900 rounded-full overflow-hidden">
-                      <div className="h-full bg-blue-500 transition-all duration-500" style={{ width: `${job.progress}%` }}></div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+      {config ? (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-[#0d1225] border border-slate-800 rounded-2xl p-4">
+            <p className="text-[10px] uppercase tracking-widest text-slate-500">Concurrency</p>
+            <p className="text-2xl font-black">{config.concurrency_limit}</p>
+          </div>
+          <div className="bg-[#0d1225] border border-slate-800 rounded-2xl p-4">
+            <p className="text-[10px] uppercase tracking-widest text-slate-500">Backoff / Tick</p>
+            <p className="text-2xl font-black">
+              {config.backoff_base_seconds}s / {config.tick_seconds}s
+            </p>
+          </div>
+          <div className="bg-[#0d1225] border border-slate-800 rounded-2xl p-4">
+            <p className="text-[10px] uppercase tracking-widest text-slate-500">Warm-up</p>
+            <p className="text-2xl font-black">
+              {config.warmup_enabled ? 'ON' : 'OFF'} ({config.warmup_interval_minutes}m)
+            </p>
           </div>
         </div>
+      ) : null}
 
-        <div className="space-y-6">
-          <div className="bg-[#0d1225] border border-slate-800 rounded-3xl p-8">
-            <h3 className="text-lg font-bold mb-6 italic uppercase tracking-tighter">{t('loadBalancing')}</h3>
-            <div className="space-y-6">
-              {[
-                { vm: 'vm-001', load: 85 },
-                { vm: 'vm-002', load: 12 },
-                { vm: 'vm-003', load: 45 },
-              ].map((node) => (
-                <div key={node.vm} className="space-y-2">
-                  <div className="flex justify-between text-[10px] font-black uppercase tracking-widest">
-                    <span className="text-slate-400">{node.vm}</span>
-                    <span className={node.load > 80 ? 'text-rose-500' : 'text-slate-500'}>{node.load}%</span>
-                  </div>
-                  <div className="h-1 w-full bg-slate-900 rounded-full overflow-hidden">
-                    <div className={`h-full transition-all duration-500 ${node.load > 80 ? 'bg-rose-500' : 'bg-emerald-500'}`} style={{ width: `${node.load}%` }}></div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+      <div className="flex flex-wrap gap-3">
+        <button
+          onClick={() => void runSchedulerTick()}
+          disabled={isBusy}
+          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-xl text-xs font-bold text-white"
+        >
+          Run Scheduler Tick
+        </button>
+        <button
+          onClick={() => void runNotebookTick()}
+          disabled={isBusy}
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-xl text-xs font-bold text-white"
+        >
+          Run Notebook Tick
+        </button>
+        <button
+          onClick={() => void runFootprintTick()}
+          disabled={isBusy}
+          className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-xl text-xs font-bold text-white"
+        >
+          Run Footprint Tick
+        </button>
+      </div>
 
-          <div className="bg-gradient-to-br from-emerald-900/20 to-blue-900/20 border border-emerald-500/20 rounded-3xl p-8">
-            <h3 className="text-sm font-black mb-4 italic uppercase tracking-tighter">Scheduler Strategy</h3>
-            <div className="space-y-3">
-              <button className="w-full py-2 bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 rounded-xl text-[10px] font-black uppercase">Least Loaded First</button>
-              <button className="w-full py-2 bg-slate-800 text-slate-500 border border-slate-700 rounded-xl text-[10px] font-black uppercase">Round Robin</button>
-              <button className="w-full py-2 bg-slate-800 text-slate-500 border border-slate-700 rounded-xl text-[10px] font-black uppercase">Priority Based</button>
-            </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="bg-[#0d1225] border border-slate-800 rounded-2xl p-4">
+          <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Scheduler Tick</p>
+          <p className="text-xs text-slate-300 font-mono">
+            {schedulerTickResult
+              ? `dispatched=${schedulerTickResult.dispatched}, warmup=${schedulerTickResult.warmup_jobs_enqueued}`
+              : 'No tick run yet.'}
+          </p>
+        </div>
+        <div className="bg-[#0d1225] border border-slate-800 rounded-2xl p-4">
+          <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Notebook Care Tick</p>
+          <p className="text-xs text-slate-300 font-mono">{notebookTickResult || 'No tick run yet.'}</p>
+        </div>
+        <div className="bg-[#0d1225] border border-slate-800 rounded-2xl p-4">
+          <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-2">Footprint Tick</p>
+          <p className="text-xs text-slate-300 font-mono">{footprintTickResult || 'No tick run yet.'}</p>
+        </div>
+      </div>
+
+      {errorText ? (
+        <div className="px-4 py-3 rounded-xl border border-rose-500/20 bg-rose-900/20 text-rose-300 text-sm">
+          {errorText}
+        </div>
+      ) : null}
+      {infoText ? (
+        <div className="px-4 py-3 rounded-xl border border-emerald-500/20 bg-emerald-900/20 text-emerald-300 text-sm">
+          {infoText}
+        </div>
+      ) : null}
+
+      <div className="bg-[#0d1225] border border-slate-800 rounded-2xl overflow-hidden">
+        <div className="p-6 border-b border-slate-800 flex items-center justify-between">
+          <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">Queue Snapshot</h3>
+          <div className="flex flex-wrap gap-2">
+            {Object.keys(taskCounts).length === 0 ? (
+              <span className="text-xs text-slate-500 font-mono">No jobs</span>
+            ) : (
+              Object.entries(taskCounts).map(([status, count]) => (
+                <span
+                  key={status}
+                  className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-[10px] text-slate-300 font-mono"
+                >
+                  {status}: {count}
+                </span>
+              ))
+            )}
           </div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead className="bg-slate-900/50 text-[10px] text-slate-500 uppercase font-black tracking-widest">
+              <tr>
+                <th className="px-6 py-4">Job</th>
+                <th className="px-6 py-4">Status</th>
+                <th className="px-6 py-4">Priority</th>
+                <th className="px-6 py-4">VM</th>
+                <th className="px-6 py-4">Progress</th>
+                <th className="px-6 py-4">Retries</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800">
+              {isLoading ? (
+                <tr>
+                  <td className="px-6 py-5 text-sm text-slate-500" colSpan={6}>
+                    Loading scheduler queue...
+                  </td>
+                </tr>
+              ) : tasks.length === 0 ? (
+                <tr>
+                  <td className="px-6 py-5 text-sm text-slate-500" colSpan={6}>
+                    Queue is empty.
+                  </td>
+                </tr>
+              ) : (
+                tasks.map((task) => (
+                  <tr key={task.id} className="hover:bg-slate-800/30 transition-colors">
+                    <td className="px-6 py-4">
+                      <div className="font-semibold text-slate-200">{task.task_type}</div>
+                      <div className="text-[10px] text-slate-500 font-mono">{task.id}</div>
+                    </td>
+                    <td className="px-6 py-4 text-xs uppercase text-slate-300">{task.status}</td>
+                    <td className="px-6 py-4 text-xs uppercase text-slate-400">{task.priority || 'medium'}</td>
+                    <td className="px-6 py-4 text-xs text-slate-400 font-mono">{task.vm_id || 'AUTO'}</td>
+                    <td className="px-6 py-4 text-xs text-slate-300">{task.progress}%</td>
+                    <td className="px-6 py-4 text-xs text-slate-300">
+                      {task.retry_count || 0}/{task.max_retries || 0}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

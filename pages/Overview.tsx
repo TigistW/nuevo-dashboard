@@ -1,275 +1,440 @@
-
-import React, { useState, useEffect } from 'react';
-import { loadData, getStorageStats } from '../services/state';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from '../App';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis } from 'recharts';
+import {
+  ApiGlobalMetrics,
+  ApiGoogleAccount,
+  ApiMicroVm,
+  ApiProtectionState,
+  ApiTelemetrySample,
+  ApiTunnel,
+  evaluateProtection,
+  getGlobalMetrics,
+  getProtectionState,
+  getTelemetryHistory,
+  listGoogleAccounts,
+  listMicroVms,
+  listTunnels,
+  resetProtectionState,
+  triggerSchedulerTick,
+} from '../services/backendApi';
 
 const Overview: React.FC = () => {
   const { t } = useTranslation();
-  const [data, setData] = useState(loadData());
-  const [stats, setStats] = useState(getStorageStats());
+  const [accounts, setAccounts] = useState<ApiGoogleAccount[]>([]);
+  const [vms, setVms] = useState<ApiMicroVm[]>([]);
+  const [tunnels, setTunnels] = useState<ApiTunnel[]>([]);
+  const [telemetry, setTelemetry] = useState<ApiTelemetrySample[]>([]);
+  const [metrics, setMetrics] = useState<ApiGlobalMetrics | null>(null);
+  const [protection, setProtection] = useState<ApiProtectionState | null>(null);
   const [expandedSection, setExpandedSection] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isBusy, setIsBusy] = useState<boolean>(false);
+  const [errorText, setErrorText] = useState<string>('');
+  const [infoText, setInfoText] = useState<string>('');
 
-  useEffect(() => {
-    const it = setInterval(() => {
-      setData(loadData());
-      setStats(getStorageStats());
-    }, 5000);
-    return () => clearInterval(it);
+  const refresh = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const [accountsRows, vmRows, tunnelRows, telemetryRows, metricsRow, protectionState] = await Promise.all([
+        listGoogleAccounts(),
+        listMicroVms(),
+        listTunnels(),
+        getTelemetryHistory(),
+        getGlobalMetrics(),
+        getProtectionState(),
+      ]);
+      setAccounts(accountsRows);
+      setVms(vmRows);
+      setTunnels(tunnelRows);
+      setTelemetry(telemetryRows);
+      setMetrics(metricsRow);
+      setProtection(protectionState);
+      setErrorText('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load overview.';
+      setErrorText(message);
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
 
-  const kpiStats = [
-    { label: t('activeWorkers'), value: data.accounts.length, icon: '🤖', color: 'blue' },
-    { label: t('ramUsage'), value: `${stats.ramUsage.used} / ${stats.ramUsage.total} GB`, icon: '⚡', color: 'emerald' },
-    { label: t('storageUsed'), value: `${stats.totalGb} GB`, icon: '💾', color: 'purple' },
-    { label: t('avgRiskScore'), value: '12/100', icon: '⚠️', color: 'amber' },
-  ];
+  useEffect(() => {
+    void refresh();
+    const interval = window.setInterval(() => {
+      void refresh();
+    }, 7000);
+    return () => window.clearInterval(interval);
+  }, [refresh]);
 
-  const predictiveAlerts = data.accounts
-    .filter(acc => acc.health.idleTimeout < 20 || acc.riskLevel === 'High')
-    .map(acc => ({
-      id: acc.id,
-      msg: `${acc.email} in high disconnect risk (${acc.health.idleTimeout}m left)`,
-      type: 'critical'
-    }));
+  const avgRisk = useMemo(() => {
+    if (accounts.length === 0) {
+      return 0;
+    }
+    return Math.round(accounts.reduce((acc, item) => acc + Number(item.risk_score || 0), 0) / accounts.length);
+  }, [accounts]);
 
-  const chartData = [
-    { name: '00:00', val: 12 }, { name: '04:00', val: 45 },
-    { name: '08:00', val: 78 }, { name: '12:00', val: 110 },
-    { name: '16:00', val: 95 }, { name: '20:00', val: 60 },
-  ];
+  const kpiStats = useMemo(
+    () => [
+      { label: t('activeWorkers'), value: String(accounts.length), icon: 'WK', color: 'blue' },
+      {
+        label: t('ramUsage'),
+        value: protection
+          ? `${(protection.snapshot.host_ram_used_mb / 1024).toFixed(1)} / ${(protection.snapshot.host_ram_total_mb / 1024).toFixed(1)} GB`
+          : 'n/a',
+        icon: 'RAM',
+        color: 'emerald',
+      },
+      {
+        label: t('storageUsed'),
+        value: protection
+          ? `${protection.snapshot.host_disk_used_gb.toFixed(1)} / ${protection.snapshot.host_disk_total_gb.toFixed(1)} GB`
+          : 'n/a',
+        icon: 'DISK',
+        color: 'purple',
+      },
+      { label: t('avgRiskScore'), value: `${avgRisk}/100`, icon: 'RISK', color: 'amber' },
+    ],
+    [accounts.length, avgRisk, protection, t]
+  );
+
+  const predictiveAlerts = useMemo(() => {
+    const alerts: Array<{ id: string; msg: string; type: 'critical' | 'warning' }> = [];
+    (protection?.signals || []).slice(0, 4).forEach((signal, index) => {
+      alerts.push({ id: `signal-${index}`, msg: signal, type: 'critical' });
+    });
+    accounts
+      .filter((item) => Number(item.risk_score || 0) >= 8)
+      .slice(0, 3)
+      .forEach((item) => {
+        alerts.push({
+          id: `acct-${item.id}`,
+          msg: `${item.email} risk score is high (${item.risk_score}).`,
+          type: 'warning',
+        });
+      });
+    return alerts.slice(0, 6);
+  }, [accounts, protection]);
+
+  const chartData = useMemo(() => {
+    if (telemetry.length === 0) {
+      return [
+        { name: '00:00', val: 0 },
+        { name: '04:00', val: 0 },
+        { name: '08:00', val: 0 },
+        { name: '12:00', val: 0 },
+        { name: '16:00', val: 0 },
+        { name: '20:00', val: 0 },
+      ];
+    }
+    return telemetry.slice().reverse().map((item) => ({ name: item.name, val: item.load }));
+  }, [telemetry]);
+
+  const healthBySection = useMemo(() => {
+    const vmErrors = vms.filter((item) => String(item.status || '').toLowerCase() !== 'running').length;
+    const tunnelErrors = tunnels.filter((item) => String(item.status || '').toLowerCase() !== 'connected').length;
+    const accountErrors = accounts.filter((item) => Number(item.risk_score || 0) >= 8).length;
+    return {
+      vms: { total: vms.length, error: vmErrors, recent: vms.filter((item) => item.status === 'running').length, resolved: 0 },
+      tunnels: {
+        total: tunnels.length,
+        error: tunnelErrors,
+        recent: tunnels.filter((item) => item.status === 'Connected').length,
+        resolved: 0,
+      },
+      accounts: {
+        total: accounts.length,
+        error: accountErrors,
+        recent: accounts.filter((item) => String(item.status || '').toLowerCase() === 'active').length,
+        resolved: accounts.filter((item) => Number(item.risk_score || 0) <= 2).length,
+      },
+    };
+  }, [accounts, tunnels, vms]);
+
+  const countryDistribution = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const vm of vms) {
+      const key = (vm.country || 'unknown').toUpperCase();
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([country, count]) => ({ country, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 3);
+  }, [vms]);
+
+  const infraStats = useMemo(() => {
+    const workerHealth = Math.max(0, Math.min(100, 100 - avgRisk * 10));
+    const networkTrust = Math.max(0, Math.min(100, metrics?.functional_ips_percent ?? 0));
+    const successRate = Math.max(0, Math.min(100, 100 - (metrics?.error_rate_percent ?? 0)));
+    return [
+      { l: t('activeWorkers'), v: workerHealth, c: 'emerald' },
+      { l: t('networkTrust'), v: networkTrust, c: 'blue' },
+      { l: t('successRate'), v: Number(successRate.toFixed(1)), c: 'emerald' },
+    ];
+  }, [avgRisk, metrics, t]);
+
+  const handleSchedulerTick = useCallback(async () => {
+    setIsBusy(true);
+    try {
+      const result = await triggerSchedulerTick();
+      setInfoText(`Scheduler tick dispatched=${result.dispatched}, warmup=${result.warmup_jobs_enqueued}.`);
+      setErrorText('');
+      await refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Scheduler tick failed.';
+      setErrorText(message);
+    } finally {
+      setIsBusy(false);
+    }
+  }, [refresh]);
+
+  const handleEvaluateProtection = useCallback(async () => {
+    setIsBusy(true);
+    try {
+      const state = await evaluateProtection(true);
+      setProtection(state);
+      setInfoText(`Protection evaluated: protective=${state.protective_mode}, failsafe=${state.failsafe_active}.`);
+      setErrorText('');
+      await refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Protection evaluation failed.';
+      setErrorText(message);
+    } finally {
+      setIsBusy(false);
+    }
+  }, [refresh]);
+
+  const handleResetProtection = useCallback(async () => {
+    setIsBusy(true);
+    try {
+      const state = await resetProtectionState();
+      setProtection(state);
+      setInfoText('Protection reset completed.');
+      setErrorText('');
+      await refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Protection reset failed.';
+      setErrorText(message);
+    } finally {
+      setIsBusy(false);
+    }
+  }, [refresh]);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-700">
-      
-      {/* SYSTEM MASTER CONTROL & CRITICAL EVENTS */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-slate-800/40 border border-slate-700/50 p-6 rounded-3xl backdrop-blur-md">
           <div className="flex items-center justify-between mb-6">
             <h3 className="text-sm font-black uppercase tracking-widest text-slate-400 flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               {t('systemControl')}
             </h3>
-            <span className="text-[10px] font-mono text-slate-500">v3.2.0-STABLE</span>
+            <span className="text-[10px] font-mono text-slate-500">live</span>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <button className="flex flex-col items-center justify-center p-4 bg-emerald-600/10 border border-emerald-500/20 rounded-2xl hover:bg-emerald-600/20 transition-all group">
-              <span className="text-2xl mb-2 group-hover:scale-110 transition-transform">🚀</span>
-              <span className="text-[10px] font-black uppercase tracking-widest text-emerald-400">{t('startSystem')}</span>
+            <button
+              onClick={() => void handleSchedulerTick()}
+              disabled={isBusy}
+              className="flex flex-col items-center justify-center p-4 bg-emerald-600/10 border border-emerald-500/20 rounded-2xl hover:bg-emerald-600/20 transition-all disabled:opacity-50"
+            >
+              <span className="text-[10px] font-black uppercase tracking-widest text-emerald-400">Run Scheduler Tick</span>
             </button>
-            <button className="flex flex-col items-center justify-center p-4 bg-blue-600/10 border border-blue-500/20 rounded-2xl hover:bg-blue-600/20 transition-all group">
-              <span className="text-2xl mb-2 group-hover:scale-110 transition-transform">🌐</span>
-              <span className="text-[10px] font-black uppercase tracking-widest text-blue-400">{t('startProxy')}</span>
+            <button
+              onClick={() => void handleEvaluateProtection()}
+              disabled={isBusy}
+              className="flex flex-col items-center justify-center p-4 bg-blue-600/10 border border-blue-500/20 rounded-2xl hover:bg-blue-600/20 transition-all disabled:opacity-50"
+            >
+              <span className="text-[10px] font-black uppercase tracking-widest text-blue-400">Evaluate Protection</span>
             </button>
-            <button className="flex flex-col items-center justify-center p-4 bg-rose-600/10 border border-rose-500/20 rounded-2xl hover:bg-rose-600/20 transition-all group">
-              <span className="text-2xl mb-2 group-hover:scale-110 transition-transform">🛑</span>
-              <span className="text-[10px] font-black uppercase tracking-widest text-rose-400">{t('stopAll')}</span>
+            <button
+              onClick={() => void handleResetProtection()}
+              disabled={isBusy}
+              className="flex flex-col items-center justify-center p-4 bg-rose-600/10 border border-rose-500/20 rounded-2xl hover:bg-rose-600/20 transition-all disabled:opacity-50"
+            >
+              <span className="text-[10px] font-black uppercase tracking-widest text-rose-400">Reset Protection</span>
             </button>
           </div>
+          {infoText ? <p className="text-xs text-emerald-300 mt-4">{infoText}</p> : null}
+          {errorText ? <p className="text-xs text-rose-300 mt-2">{errorText}</p> : null}
         </div>
 
         <div className="bg-rose-900/10 border border-rose-500/20 p-6 rounded-3xl">
-          <h3 className="text-sm font-black uppercase tracking-widest text-rose-500 mb-4 flex items-center gap-2">
-            <span>🚨</span> {t('criticalEvents')}
-          </h3>
+          <h3 className="text-sm font-black uppercase tracking-widest text-rose-500 mb-4">Critical Events</h3>
           <div className="space-y-3">
-            <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl flex items-start gap-3">
-              <span className="text-rose-500 mt-0.5">⚠️</span>
-              <div>
-                <p className="text-xs font-bold text-rose-400">{t('googleAuthError')}</p>
-                <p className="text-[10px] text-rose-500/70 font-mono">Account: farm-user-09@gmail.com</p>
-              </div>
-            </div>
-            <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-start gap-3">
-              <span className="text-amber-500 mt-0.5">⚡</span>
-              <div>
-                <p className="text-xs font-bold text-amber-400">High Latency Detected</p>
-                <p className="text-[10px] text-amber-500/70 font-mono">Node: W-03 // 450ms</p>
-              </div>
-            </div>
+            {predictiveAlerts.length === 0 ? (
+              <p className="text-xs text-slate-500">No active critical alerts.</p>
+            ) : (
+              predictiveAlerts.map((alert) => (
+                <div
+                  key={alert.id}
+                  className={`p-3 rounded-xl flex items-start gap-3 ${
+                    alert.type === 'critical'
+                      ? 'bg-rose-500/10 border border-rose-500/20'
+                      : 'bg-amber-500/10 border border-amber-500/20'
+                  }`}
+                >
+                  <span className={alert.type === 'critical' ? 'text-rose-500' : 'text-amber-500'}>ALERT</span>
+                  <p className="text-xs text-slate-200">{alert.msg}</p>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>
 
-      {/* KPI Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {kpiStats.map((s, i) => (
-          <div key={i} className="bg-slate-800/40 backdrop-blur-md border border-slate-700/50 p-6 rounded-2xl hover:border-emerald-500/30 transition-all group relative overflow-hidden">
-            <div className={`absolute -right-4 -top-4 w-24 h-24 bg-${s.color}-500/5 blur-3xl rounded-full`}></div>
+        {kpiStats.map((stat) => (
+          <div
+            key={stat.label}
+            className="bg-slate-800/40 backdrop-blur-md border border-slate-700/50 p-6 rounded-2xl hover:border-emerald-500/30 transition-all group relative overflow-hidden"
+          >
+            <div className={`absolute -right-4 -top-4 w-24 h-24 bg-${stat.color}-500/5 blur-3xl rounded-full`} />
             <div className="flex justify-between items-start mb-4">
-               <div className="text-3xl">{s.icon}</div>
-               <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{t('live')}</div>
+              <div className="text-xs font-black text-slate-300">{stat.icon}</div>
+              <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest">live</div>
             </div>
-            <p className="text-slate-400 text-xs font-medium uppercase tracking-wider">{s.label}</p>
-            <p className="text-3xl font-black mt-1">{s.value}</p>
+            <p className="text-slate-400 text-xs font-medium uppercase tracking-wider">{stat.label}</p>
+            <p className="text-2xl font-black mt-1">{stat.value}</p>
           </div>
         ))}
       </div>
 
-      {/* OPERATIONAL HEALTH (EXPANDABLE) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[
-          { id: 'vms', label: 'Micro-VMs', icon: '📦', data: stats.vms },
-          { id: 'tunnels', label: 'Tunnels', icon: '🔗', data: stats.tunnels },
-          { id: 'accounts', label: 'Accounts', icon: '👤', data: stats.accounts }
-        ].map((sec) => (
-          <div 
-            key={sec.id} 
-            onClick={() => setExpandedSection(expandedSection === sec.id ? null : sec.id)}
-            className={`bg-slate-800/40 border border-slate-700/50 rounded-2xl p-5 cursor-pointer transition-all hover:bg-slate-800/60 ${expandedSection === sec.id ? 'ring-2 ring-blue-500/50' : ''}`}
+          { id: 'vms', label: 'MicroVMs', data: healthBySection.vms },
+          { id: 'tunnels', label: 'Tunnels', data: healthBySection.tunnels },
+          { id: 'accounts', label: 'Accounts', data: healthBySection.accounts },
+        ].map((section) => (
+          <div
+            key={section.id}
+            onClick={() => setExpandedSection(expandedSection === section.id ? null : section.id)}
+            className={`bg-slate-800/40 border border-slate-700/50 rounded-2xl p-5 cursor-pointer transition-all hover:bg-slate-800/60 ${
+              expandedSection === section.id ? 'ring-2 ring-blue-500/50' : ''
+            }`}
           >
             <div className="flex justify-between items-center">
-              <div className="flex items-center gap-3">
-                <span className="text-xl">{sec.icon}</span>
-                <span className="font-bold text-sm uppercase tracking-tight">{sec.label}</span>
-              </div>
-              <span className={`text-xs font-mono ${sec.data.error > 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
-                {sec.data.error > 0 ? `⚠️ ${sec.data.error} ERR` : '✅ OK'}
+              <span className="font-bold text-sm uppercase tracking-tight">{section.label}</span>
+              <span className={`text-xs font-mono ${section.data.error > 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+                {section.data.error > 0 ? `${section.data.error} ERR` : 'OK'}
               </span>
             </div>
-            
-            {expandedSection === sec.id && (
-              <div className="mt-4 pt-4 border-t border-slate-700/50 space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
-                <div className="flex justify-between text-[10px] font-mono text-slate-400">
-                  <span>{t('totalUnits')}</span>
-                  <span className="text-slate-200">{sec.data.total}</span>
-                </div>
-                <div className="flex justify-between text-[10px] font-mono text-slate-400">
-                  <span>{t('errorUnits')}</span>
-                  <span className={sec.data.error > 0 ? 'text-rose-500' : 'text-slate-200'}>{sec.data.error}</span>
-                </div>
-                <div className="flex justify-between text-[10px] font-mono text-slate-400">
-                  <span>{t('recentActivity')}</span>
-                  <span className="text-blue-400">+{sec.data.recent} NEW</span>
-                </div>
-                <div className="flex justify-between text-[10px] font-mono text-slate-400">
-                  <span>{t('resolvedUnits')}</span>
-                  <span className="text-emerald-400">-{sec.data.resolved} FIXED</span>
-                </div>
-                <div className="pt-2">
-                  <div className="h-1 w-full bg-slate-900 rounded-full overflow-hidden">
-                    <div className="h-full bg-blue-500" style={{ width: `${(sec.data.total / 20) * 100}%` }}></div>
-                  </div>
-                </div>
+            {expandedSection === section.id ? (
+              <div className="mt-4 pt-4 border-t border-slate-700/50 space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                <Row label={t('totalUnits')} value={String(section.data.total)} />
+                <Row label={t('errorUnits')} value={String(section.data.error)} />
+                <Row label={t('recentActivity')} value={String(section.data.recent)} />
+                <Row label={t('resolvedUnits')} value={String(section.data.resolved)} />
               </div>
-            )}
+            ) : null}
           </div>
         ))}
       </div>
 
-      {/* WORKER OPERATIONAL UNITS */}
       <div className="bg-[#0d1225] border border-slate-800 rounded-3xl p-8">
         <div className="flex justify-between items-center mb-6">
-          <h3 className="text-lg font-bold flex items-center gap-2">
-            <span>🤖</span> {t('activeWorkers')}
-          </h3>
+          <h3 className="text-lg font-bold">{t('activeWorkers')}</h3>
           <div className="flex gap-2">
-            <span className="px-2 py-1 bg-emerald-500/10 text-emerald-500 text-[8px] font-black rounded uppercase">94% Healthy</span>
-            <span className="px-2 py-1 bg-blue-500/10 text-blue-500 text-[8px] font-black rounded uppercase">6% Busy</span>
+            <span className="px-2 py-1 bg-emerald-500/10 text-emerald-500 text-[8px] font-black rounded uppercase">
+              {accounts.filter((item) => Number(item.risk_score || 0) < 8).length} stable
+            </span>
+            <span className="px-2 py-1 bg-amber-500/10 text-amber-500 text-[8px] font-black rounded uppercase">
+              {accounts.filter((item) => Number(item.risk_score || 0) >= 8).length} risk
+            </span>
           </div>
         </div>
         <div className="grid grid-cols-3 sm:grid-cols-6 lg:grid-cols-10 gap-4">
-          {data.accounts.slice(0, 20).map((w, i) => (
-            <div key={i} className="flex flex-col items-center gap-2 p-2 bg-slate-900/50 rounded-xl border border-slate-800 hover:border-emerald-500/50 transition-all cursor-pointer group">
-              <div className="relative">
-                <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-lg transition-transform group-hover:scale-110 ${
-                  w.riskLevel === 'High' ? 'bg-rose-500/10 text-rose-500' : 'bg-slate-800 text-slate-400'
-                }`}>
-                  {w.riskLevel === 'High' ? '⚠️' : '✅'}
-                </div>
-                <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#0d1225] ${
-                  w.status === 'Busy' ? 'bg-blue-500' : 'bg-emerald-500'
-                }`}></div>
+          {accounts.slice(0, 20).map((account) => (
+            <div
+              key={account.id}
+              className="flex flex-col items-center gap-2 p-2 bg-slate-900/50 rounded-xl border border-slate-800 hover:border-emerald-500/50 transition-all"
+            >
+              <div
+                className={`w-10 h-10 rounded-lg flex items-center justify-center text-[10px] font-black ${
+                  Number(account.risk_score || 0) >= 8 ? 'bg-rose-500/10 text-rose-500' : 'bg-slate-800 text-slate-300'
+                }`}
+              >
+                {Number(account.risk_score || 0) >= 8 ? 'RISK' : 'OK'}
               </div>
-              <span className="text-[8px] font-mono text-slate-500 truncate w-full text-center">{w.id}</span>
+              <span className="text-[8px] font-mono text-slate-500 truncate w-full text-center">{account.id}</span>
             </div>
           ))}
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Resource Load Graph */}
         <div className="lg:col-span-2 bg-[#0d1225] border border-slate-800 rounded-3xl p-8">
-           <div className="flex justify-between items-center mb-8">
-             <div>
-               <h3 className="text-lg font-bold">{t('automationThroughput')}</h3>
-               <p className="text-xs text-slate-500">{t('globalSystemRequests')}</p>
-             </div>
-             <div className="flex gap-2">
-                <div className="flex items-center gap-2 px-3 py-1 bg-slate-900 border border-slate-800 rounded-lg text-[10px] text-slate-400">
-                   <span className="w-2 h-2 rounded-full bg-emerald-500"></span> {t('loadStable')}
-                </div>
-             </div>
-           </div>
-           <div className="h-72">
-             <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData}>
-                  <defs>
-                    <linearGradient id="colorVal" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <XAxis dataKey="name" stroke="#475569" fontSize={10} axisLine={false} tickLine={false} />
-                  <Tooltip contentStyle={{ backgroundColor: '#0d1225', border: 'none', borderRadius: '12px', fontSize: '10px' }} />
-                  <Area type="monotone" dataKey="val" stroke="#10b981" fillOpacity={1} fill="url(#colorVal)" strokeWidth={3} />
-                </AreaChart>
-             </ResponsiveContainer>
-           </div>
+          <div className="flex justify-between items-center mb-8">
+            <div>
+              <h3 className="text-lg font-bold">{t('automationThroughput')}</h3>
+              <p className="text-xs text-slate-500">{t('globalSystemRequests')}</p>
+            </div>
+            <div className="text-xs text-slate-500">{isLoading ? 'refreshing...' : 'live'}</div>
+          </div>
+          <div className="h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData}>
+                <defs>
+                  <linearGradient id="colorVal" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="name" stroke="#475569" fontSize={10} axisLine={false} tickLine={false} />
+                <Tooltip contentStyle={{ backgroundColor: '#0d1225', border: 'none', borderRadius: '12px', fontSize: '10px' }} />
+                <Area type="monotone" dataKey="val" stroke="#10b981" fillOpacity={1} fill="url(#colorVal)" strokeWidth={3} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
         </div>
 
-        {/* Infrastructure Health & Risk */}
         <div className="space-y-6">
-           <div className="bg-[#0d1225] border border-slate-800 rounded-3xl p-8 space-y-8">
-              <h3 className="text-lg font-bold flex items-center gap-2">
-                <span>🛡️</span> {t('infrastructure')}
-              </h3>
-              
-              <div className="space-y-6">
-                 {[
-                   { l: t('activeWorkers'), v: 88, c: 'emerald' },
-                   { l: t('networkTrust'), v: 92, c: 'blue' },
-                   { l: t('successRate'), v: 94, c: 'emerald' }
-                 ].map((m, i) => (
-                   <div key={i} className="space-y-2">
-                     <div className="flex justify-between text-[11px] font-bold">
-                       <span className="text-slate-400 uppercase tracking-tighter">{m.l}</span>
-                       <span className={`text-${m.c}-400`}>{m.v}%</span>
-                     </div>
-                     <div className="h-1.5 w-full bg-slate-900 rounded-full overflow-hidden">
-                       <div className={`h-full bg-${m.c}-500 transition-all duration-1000`} style={{ width: `${m.v}%` }}></div>
-                     </div>
-                   </div>
-                 ))}
+          <div className="bg-[#0d1225] border border-slate-800 rounded-3xl p-8 space-y-6">
+            <h3 className="text-lg font-bold">{t('infrastructure')}</h3>
+            {infraStats.map((metric) => (
+              <div key={metric.l} className="space-y-2">
+                <div className="flex justify-between text-[11px] font-bold">
+                  <span className="text-slate-400 uppercase tracking-tighter">{metric.l}</span>
+                  <span className={`text-${metric.c}-400`}>{metric.v}%</span>
+                </div>
+                <div className="h-1.5 w-full bg-slate-900 rounded-full overflow-hidden">
+                  <div className={`h-full bg-${metric.c}-500`} style={{ width: `${metric.v}%` }} />
+                </div>
               </div>
-           </div>
+            ))}
+          </div>
 
-           {/* ADDED: COUNTRY DISTRIBUTION */}
-           <div className="bg-gradient-to-br from-indigo-900/20 to-blue-900/20 border border-indigo-500/20 rounded-3xl p-6">
-              <div className="flex items-center justify-between mb-4">
-                <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Country Distribution</span>
-                <span className="text-[10px] bg-indigo-500 text-white px-2 py-0.5 rounded-full">Global</span>
-              </div>
-              <div className="space-y-2">
-                {[
-                  { country: 'Spain', count: 12, flag: '🇪🇸' },
-                  { country: 'USA', count: 8, flag: '🇺🇸' },
-                  { country: 'Japan', count: 5, flag: '🇯🇵' },
-                ].map((c, i) => (
-                  <div key={i} className="flex items-center justify-between text-xs font-mono">
-                    <div className="flex items-center gap-2">
-                      <span>{c.flag}</span>
-                      <span className="text-slate-300">{c.country}</span>
-                    </div>
-                    <span className="text-slate-500">{c.count} Workers</span>
+          <div className="bg-gradient-to-br from-indigo-900/20 to-blue-900/20 border border-indigo-500/20 rounded-3xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Country Distribution</span>
+              <span className="text-[10px] bg-indigo-500 text-white px-2 py-0.5 rounded-full">Live</span>
+            </div>
+            <div className="space-y-2">
+              {countryDistribution.length === 0 ? (
+                <p className="text-xs text-slate-500">No running VM geography yet.</p>
+              ) : (
+                countryDistribution.map((item) => (
+                  <div key={item.country} className="flex items-center justify-between text-xs font-mono">
+                    <span className="text-slate-300">{item.country}</span>
+                    <span className="text-slate-500">{item.count} VMs</span>
                   </div>
-                ))}
-              </div>
-           </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 };
+
+function Row({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div className="flex justify-between text-[10px] font-mono text-slate-400">
+      <span>{label}</span>
+      <span className="text-slate-200">{value}</span>
+    </div>
+  );
+}
 
 export default Overview;

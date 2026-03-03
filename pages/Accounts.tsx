@@ -1,267 +1,344 @@
-
-import React, { useState, useEffect } from 'react';
-import { loadData, saveData, appendLog, addAccount, generateAiAccount } from '../services/state';
-import { Account, AccountStatus } from '../types';
-import { useTranslation } from '../App';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  ApiGoogleAccount,
+  ApiMicroVm,
+  assignGoogleAccount,
+  createGoogleAccount,
+  getAccountMode,
+  listGoogleAccounts,
+  listMicroVms,
+  releaseGoogleAccount,
+  setAccountMode,
+} from '../services/backendApi';
 
 const Accounts: React.FC = () => {
-  const { t } = useTranslation();
-  const [data, setData] = useState(loadData());
-  const [filter, setFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState<AccountStatus | 'All'>('All');
-  
-  // Creation States
-  const [creationMode, setCreationMode] = useState<'single' | 'bulk'>('single');
-  const [newAccEmail, setNewAccEmail] = useState('');
-  const [newAccGpu, setNewAccGpu] = useState('T4');
-  const [bulkEmails, setBulkEmails] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [accounts, setAccounts] = useState<ApiGoogleAccount[]>([]);
+  const [vms, setVms] = useState<ApiMicroVm[]>([]);
+  const [mode, setMode] = useState<'one_to_one' | 'dynamic_pool'>('one_to_one');
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isBusy, setIsBusy] = useState<boolean>(false);
+  const [errorText, setErrorText] = useState<string>('');
+  const [infoText, setInfoText] = useState<string>('');
 
-  const handleAiCreate = async () => {
-    setIsGenerating(true);
-    await generateAiAccount();
-    setData(loadData());
-    setIsGenerating(false);
-  };
+  const [newEmail, setNewEmail] = useState<string>('');
+  const [newId, setNewId] = useState<string>('');
 
-  useEffect(() => {
-    const interval = setInterval(() => setData(loadData()), 8000);
-    return () => clearInterval(interval);
+  const [assignVmId, setAssignVmId] = useState<string>('');
+  const [assignAccountId, setAssignAccountId] = useState<string>('');
+
+  const refresh = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const [accountRows, vmRows, modeRow] = await Promise.all([
+        listGoogleAccounts(),
+        listMicroVms(),
+        getAccountMode(),
+      ]);
+      setAccounts(accountRows);
+      setVms(vmRows);
+      setMode(modeRow.mode);
+      setErrorText('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load account state.';
+      setErrorText(message);
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
 
-  const handleCreateAccount = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (creationMode === 'single') {
-      if (!newAccEmail) return;
-      addAccount(newAccEmail, newAccGpu);
-      setNewAccEmail('');
-    } else {
-      const emails = bulkEmails.split(/[\s,]+/).filter(e => e.includes('@'));
-      emails.forEach(email => addAccount(email, newAccGpu));
-      setBulkEmails('');
-    }
-    setData(loadData());
-  };
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
-  const handleAction = (id: string, action: string) => {
-    const newData = { ...data };
-    const idx = newData.accounts.findIndex(a => a.id === id);
-    if (idx === -1) return;
+  const runningVms = useMemo(
+    () => vms.filter((vm) => String(vm.status || '').toLowerCase() === 'running'),
+    [vms]
+  );
 
-    const email = newData.accounts[idx].email;
-    
-    switch (action) {
-      case 'reset':
-        newData.accounts[idx].status = AccountStatus.FREE;
-        newData.accounts[idx].currentTask = null;
-        appendLog('info', email, 'Manual reset triggered.');
-        break;
-      case 'disconnect':
-        newData.accounts[idx].status = AccountStatus.DISCONNECTED;
-        appendLog('warning', email, 'Account manually disconnected.');
-        break;
-      case 'delete':
-        newData.accounts.splice(idx, 1);
-        appendLog('error', 'System', `Account deleted: ${email}`);
-        break;
-    }
+  const handleModeChange = useCallback(
+    async (nextMode: 'one_to_one' | 'dynamic_pool') => {
+      setIsBusy(true);
+      try {
+        const updated = await setAccountMode(nextMode);
+        setMode(updated.mode);
+        setInfoText(`Account mode updated to '${updated.mode}'.`);
+        setErrorText('');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to update account mode.';
+        setErrorText(message);
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    []
+  );
 
-    saveData(newData);
-    setData(newData);
-  };
+  const handleCreateAccount = useCallback(
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      const email = newEmail.trim();
+      if (!email) {
+        setErrorText('Email is required.');
+        return;
+      }
+      setIsBusy(true);
+      try {
+        await createGoogleAccount({
+          id: newId.trim() || undefined,
+          email,
+        });
+        setNewEmail('');
+        setNewId('');
+        setInfoText(`Account '${email}' created.`);
+        setErrorText('');
+        await refresh();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to create account.';
+        setErrorText(message);
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    [newEmail, newId, refresh]
+  );
 
-  const getStatusLabel = (status: AccountStatus) => {
-    switch (status) {
-      case AccountStatus.FREE: return t('statusFree');
-      case AccountStatus.BUSY: return t('statusBusy');
-      case AccountStatus.DISCONNECTED: return t('statusDisconnected');
-      default: return status;
-    }
-  };
+  const handleAssign = useCallback(
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      if (!assignVmId.trim()) {
+        setErrorText('Select a VM before assigning.');
+        return;
+      }
+      setIsBusy(true);
+      try {
+        const result = await assignGoogleAccount({
+          vm_id: assignVmId.trim(),
+          ...(assignAccountId.trim() ? { account_id: assignAccountId.trim() } : {}),
+        });
+        setInfoText(
+          `Assigned ${result.email} (${result.account_id}) to ${result.vm_id} [mode=${result.mode}, reassigned=${result.reassigned}].`
+        );
+        setErrorText('');
+        await refresh();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to assign account.';
+        setErrorText(message);
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    [assignVmId, assignAccountId, refresh]
+  );
 
-  const filteredAccounts = data.accounts.filter(acc => {
-    const matchesSearch = acc.email.toLowerCase().includes(filter.toLowerCase());
-    const matchesStatus = statusFilter === 'All' || acc.status === statusFilter;
-    return matchesSearch && matchesStatus;
-  });
+  const handleRelease = useCallback(
+    async (accountId: string) => {
+      setIsBusy(true);
+      try {
+        const released = await releaseGoogleAccount(accountId);
+        setInfoText(`Released account '${released.email}'.`);
+        setErrorText('');
+        await refresh();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to release account.';
+        setErrorText(message);
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    [refresh]
+  );
 
   return (
-    <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      
-      {/* SECCIÓN DE CREACIÓN DE CUENTAS (PERSISTENTE) */}
-      <section className="bg-slate-800 rounded-2xl border border-slate-700 shadow-xl overflow-hidden">
-        <div className="border-b border-slate-700 p-6 bg-slate-800/50 flex justify-between items-center">
-          <div>
-            <h2 className="text-xl font-bold flex items-center gap-2">
-              <span className="text-emerald-500">➕</span> {t('newAccountTitle')}
-            </h2>
-            <p className="text-sm text-slate-400">{t('registerIdentities')}</p>
-          </div>
-          <div className="flex bg-slate-900 p-1 rounded-lg border border-slate-700">
-            <button 
-              onClick={() => setCreationMode('single')}
-              className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${creationMode === 'single' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
-            >
-              {t('individual')}
-            </button>
-            <button 
-              onClick={() => setCreationMode('bulk')}
-              className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${creationMode === 'bulk' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
-            >
-              {t('bulk')}
-            </button>
-            <button 
-              onClick={handleAiCreate}
-              disabled={isGenerating}
-              className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-2 ${isGenerating ? 'bg-purple-900/50 text-purple-300' : 'bg-purple-600 text-white hover:bg-purple-500 shadow-lg'}`}
-            >
-              {isGenerating ? '🤖 ...' : `✨ ${t('aiAutoCreate')}`}
-            </button>
-          </div>
+    <div className="space-y-8 animate-in fade-in duration-500">
+      <div className="flex justify-between items-center">
+        <div>
+          <h2 className="text-2xl font-black italic tracking-tighter uppercase">Google Account Management</h2>
+          <p className="text-sm text-slate-500 font-mono">Mode A (1:1) and Mode B (Dynamic Pool)</p>
         </div>
+        <button
+          onClick={() => void refresh()}
+          disabled={isBusy}
+          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded-xl text-xs font-bold transition-all border border-slate-700"
+        >
+          Refresh
+        </button>
+      </div>
 
-        <form onSubmit={handleCreateAccount} className="p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-end">
-          <div className="lg:col-span-5 space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">{t('emailLabel')}</label>
-            {creationMode === 'single' ? (
-              <input 
-                type="email" 
-                placeholder="farm-user-01@gmail.com"
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
-                value={newAccEmail}
-                onChange={(e) => setNewAccEmail(e.target.value)}
-              />
-            ) : (
-              <textarea 
-                placeholder="user1@gmail.com, user2@gmail.com..."
-                rows={1}
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-emerald-500 transition-all min-h-[48px] resize-none"
-                value={bulkEmails}
-                onChange={(e) => setBulkEmails(e.target.value)}
-              />
-            )}
-          </div>
+      <div className="bg-[#0d1225] border border-slate-800 rounded-2xl p-6 space-y-5">
+        <div className="flex gap-3">
+          <button
+            onClick={() => void handleModeChange('one_to_one')}
+            disabled={isBusy}
+            className={`px-4 py-2 rounded-lg text-xs font-bold border transition-all ${
+              mode === 'one_to_one'
+                ? 'bg-emerald-600 text-white border-emerald-500'
+                : 'bg-slate-900 text-slate-400 border-slate-700'
+            }`}
+          >
+            Mode A - 1:1
+          </button>
+          <button
+            onClick={() => void handleModeChange('dynamic_pool')}
+            disabled={isBusy}
+            className={`px-4 py-2 rounded-lg text-xs font-bold border transition-all ${
+              mode === 'dynamic_pool'
+                ? 'bg-blue-600 text-white border-blue-500'
+                : 'bg-slate-900 text-slate-400 border-slate-700'
+            }`}
+          >
+            Mode B - Dynamic Pool
+          </button>
+        </div>
+        <p className="text-xs font-mono text-slate-500">
+          Current mode: <span className="text-slate-300">{mode}</span>
+        </p>
+      </div>
 
-          <div className="lg:col-span-4 space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">{t('gpuLabel')}</label>
-            <select 
-              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-emerald-500 transition-all cursor-pointer appearance-none"
-              value={newAccGpu}
-              onChange={(e) => setNewAccGpu(e.target.value)}
-            >
-              <option value="T4">NVIDIA Tesla T4</option>
-              <option value="L4">NVIDIA L4 Next-Gen</option>
-              <option value="V100">NVIDIA V100 Tensor Core</option>
-              <option value="A100">NVIDIA A100 (80GB/40GB)</option>
-              <option value="CPU">CPU Only (No GPU)</option>
-            </select>
-          </div>
+      {errorText ? (
+        <div className="px-4 py-3 rounded-xl border border-rose-500/20 bg-rose-900/20 text-rose-300 text-sm">
+          {errorText}
+        </div>
+      ) : null}
+      {infoText ? (
+        <div className="px-4 py-3 rounded-xl border border-emerald-500/20 bg-emerald-900/20 text-emerald-300 text-sm">
+          {infoText}
+        </div>
+      ) : null}
 
-          <div className="lg:col-span-3">
-            <button 
-              type="submit" 
-              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3.5 rounded-xl font-bold shadow-lg shadow-emerald-900/20 transition-all active:scale-95 flex items-center justify-center gap-2"
-            >
-              <span>🚀</span> {creationMode === 'single' ? t('save') : t('importList')}
-            </button>
-          </div>
-        </form>
-      </section>
-
-      {/* LISTADO Y FILTROS */}
-      <div className="space-y-6">
-        <div className="flex flex-col md:flex-row gap-4 justify-between items-center bg-slate-800 p-4 rounded-xl border border-slate-700">
-          <div className="flex flex-1 gap-4 w-full">
-            <div className="relative flex-1">
-              <span className="absolute left-3 top-2.5 text-slate-500">🔍</span>
-              <input 
-                type="text" 
-                placeholder={t('searchEmail')}
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-10 pr-4 py-2 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+        <section className="bg-[#0d1225] border border-slate-800 rounded-2xl p-6">
+          <h3 className="text-sm font-black uppercase tracking-widest text-slate-400 mb-4">Create Account</h3>
+          <form onSubmit={handleCreateAccount} className="space-y-4">
+            <div>
+              <label className="block text-xs text-slate-500 mb-1 uppercase">Account ID (optional)</label>
+              <input
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-emerald-500"
+                value={newId}
+                onChange={(event) => setNewId(event.target.value)}
+                placeholder="acc-1001"
               />
             </div>
-            <select 
-              className="bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 outline-none cursor-pointer"
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as any)}
+            <div>
+              <label className="block text-xs text-slate-500 mb-1 uppercase">Email</label>
+              <input
+                type="email"
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-emerald-500"
+                value={newEmail}
+                onChange={(event) => setNewEmail(event.target.value)}
+                placeholder="worker@example.com"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={isBusy}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-white text-xs font-bold"
             >
-              <option value="All">{t('allStatus')}</option>
-              <option value={AccountStatus.FREE}>{t('statusFree')}</option>
-              <option value={AccountStatus.BUSY}>{t('statusBusy')}</option>
-              <option value={AccountStatus.DISCONNECTED}>{t('statusDisconnected')}</option>
-            </select>
-          </div>
-        </div>
+              Create Account
+            </button>
+          </form>
+        </section>
 
-        <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden shadow-2xl">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead className="bg-slate-900/50 text-xs text-slate-400 uppercase tracking-wider">
-                <tr>
-                  <th className="px-6 py-4">{t('accounts')}</th>
-                  <th className="px-6 py-4">{t('nickname')}</th>
-                  <th className="px-6 py-4">{t('password')}</th>
-                  <th className="px-6 py-4">{t('originalCountry')}</th>
-                  <th className="px-6 py-4">{t('status')}</th>
-                  <th className="px-6 py-4">{t('gpu')}</th>
-                  <th className="px-6 py-4 text-center">{t('actions')}</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-700">
-                {filteredAccounts.map((acc) => (
-                  <tr key={acc.id} className="hover:bg-slate-700/30 transition-colors group">
-                    <td className="px-6 py-4">
-                      <div className="font-semibold text-slate-200">{acc.email}</div>
-                      <div className="text-[10px] text-slate-500 font-mono">ID: {acc.id}</div>
-                    </td>
-                    <td className="px-6 py-4 text-xs text-slate-300">
-                      {acc.nickname || '—'}
-                    </td>
-                    <td className="px-6 py-4 font-mono text-xs text-slate-400">
-                      {acc.password || '••••••••'}
-                    </td>
-                    <td className="px-6 py-4 text-xs text-slate-300">
-                      {acc.originalCountry || '—'}
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                        acc.status === AccountStatus.FREE ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' :
-                        acc.status === AccountStatus.BUSY ? 'bg-blue-500/10 text-blue-500 border border-blue-500/20' :
-                        'bg-rose-500/10 text-rose-500 border border-rose-500/20'
-                      }`}>
-                        {getStatusLabel(acc.status)}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 font-mono text-sm text-slate-400">
-                      {acc.currentTask || '—'}
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className="text-xs px-2 py-0.5 bg-slate-900 rounded border border-slate-700 text-slate-300">
-                        {acc.gpuType}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-xs text-slate-400">{acc.runningTime}</td>
-                    <td className="px-6 py-4">
-                      <div className="flex justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => handleAction(acc.id, 'reset')} title="Reiniciar" className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-slate-300">🔄</button>
-                        <button onClick={() => handleAction(acc.id, 'disconnect')} title="Detener" className="p-2 bg-rose-900/20 hover:bg-rose-900/40 rounded-lg text-rose-500">🛑</button>
-                        <button onClick={() => handleAction(acc.id, 'delete')} title="Eliminar" className="p-2 bg-rose-900/40 hover:bg-rose-600 rounded-lg text-white">🗑️</button>
-                      </div>
-                    </td>
-                  </tr>
+        <section className="bg-[#0d1225] border border-slate-800 rounded-2xl p-6">
+          <h3 className="text-sm font-black uppercase tracking-widest text-slate-400 mb-4">Assign Account</h3>
+          <form onSubmit={handleAssign} className="space-y-4">
+            <div>
+              <label className="block text-xs text-slate-500 mb-1 uppercase">Target VM</label>
+              <select
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-blue-500"
+                value={assignVmId}
+                onChange={(event) => setAssignVmId(event.target.value)}
+              >
+                <option value="">Select VM</option>
+                {runningVms.map((vm) => (
+                  <option key={vm.id} value={vm.id}>
+                    {vm.id} ({vm.country})
+                  </option>
                 ))}
-                {filteredAccounts.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="px-6 py-12 text-center text-slate-500 italic">{t('noAccountsFound')}</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-500 mb-1 uppercase">Preferred Account (optional)</label>
+              <select
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-blue-500"
+                value={assignAccountId}
+                onChange={(event) => setAssignAccountId(event.target.value)}
+              >
+                <option value="">Auto-select</option>
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.id} ({account.email})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="submit"
+              disabled={isBusy}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg text-white text-xs font-bold"
+            >
+              Assign
+            </button>
+          </form>
+        </section>
       </div>
+
+      <section className="bg-[#0d1225] border border-slate-800 rounded-2xl overflow-hidden">
+        <div className="p-6 border-b border-slate-800 flex justify-between items-center">
+          <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">Account Inventory</h3>
+          <span className="text-xs text-slate-500 font-mono">Total: {accounts.length}</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead className="bg-slate-900/50 text-[10px] text-slate-500 uppercase font-black tracking-widest">
+              <tr>
+                <th className="px-6 py-4">Account</th>
+                <th className="px-6 py-4">Status</th>
+                <th className="px-6 py-4">VM</th>
+                <th className="px-6 py-4">Risk</th>
+                <th className="px-6 py-4">Warmup</th>
+                <th className="px-6 py-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800">
+              {isLoading ? (
+                <tr>
+                  <td className="px-6 py-5 text-sm text-slate-500" colSpan={6}>
+                    Loading accounts...
+                  </td>
+                </tr>
+              ) : accounts.length === 0 ? (
+                <tr>
+                  <td className="px-6 py-5 text-sm text-slate-500" colSpan={6}>
+                    No accounts registered.
+                  </td>
+                </tr>
+              ) : (
+                accounts.map((account) => (
+                  <tr key={account.id} className="hover:bg-slate-800/30 transition-colors">
+                    <td className="px-6 py-4">
+                      <div className="font-semibold text-slate-200">{account.email}</div>
+                      <div className="text-[10px] text-slate-500 font-mono">{account.id}</div>
+                    </td>
+                    <td className="px-6 py-4 text-xs text-slate-300 uppercase">{account.status}</td>
+                    <td className="px-6 py-4 text-xs text-slate-400 font-mono">{account.vm_id || 'unassigned'}</td>
+                    <td className="px-6 py-4 text-xs text-slate-300">{account.risk_score}</td>
+                    <td className="px-6 py-4 text-xs text-slate-300">{account.warmup_state}</td>
+                    <td className="px-6 py-4 text-right">
+                      <button
+                        onClick={() => void handleRelease(account.id)}
+                        disabled={isBusy || !account.vm_id}
+                        className="px-3 py-1.5 bg-rose-900/20 hover:bg-rose-900/40 disabled:opacity-50 rounded-lg text-[10px] font-bold border border-rose-500/20 text-rose-400"
+                      >
+                        Release
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   );
 };

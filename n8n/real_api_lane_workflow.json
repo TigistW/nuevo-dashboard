@@ -1,5 +1,5 @@
 {
-  "name": "Real API Lane - VM + IP + Verification + Job",
+  "name": "Real API Lane - VM + IP + Verification + CAPTCHA + Job",
   "nodes": [
     {
       "parameters": {},
@@ -56,6 +56,36 @@
               "id": "set-7",
               "name": "task_type",
               "value": "LoadTest",
+              "type": "string"
+            },
+            {
+              "id": "set-8",
+              "name": "verification_type",
+              "value": "SMS",
+              "type": "string"
+            },
+            {
+              "id": "set-9",
+              "name": "verification_provider",
+              "value": "Twilio",
+              "type": "string"
+            },
+            {
+              "id": "set-10",
+              "name": "verification_destination",
+              "value": "+15550001111",
+              "type": "string"
+            },
+            {
+              "id": "set-11",
+              "name": "captcha_provider",
+              "value": "google-recaptcha",
+              "type": "string"
+            },
+            {
+              "id": "set-12",
+              "name": "captcha_source",
+              "value": "n8n-verification-lane",
               "type": "string"
             }
           ]
@@ -334,6 +364,242 @@
     {
       "parameters": {
         "method": "POST",
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/verification/requests' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"vm_id\": $node['Set Input'].json.vm_id, \"worker_id\": 'worker-' + $node['Set Input'].json.vm_id, \"verification_type\": String($node['Set Input'].json.verification_type || 'SMS').toUpperCase(), \"provider\": $node['Set Input'].json.verification_provider || 'Twilio', \"destination\": $node['Set Input'].json.verification_destination || '+15550001111' } }}",
+        "options": {}
+      },
+      "id": "http-create-verification-request-1",
+      "name": "HTTP Create Verification Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3560,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "id": "wait-verification-1",
+      "name": "Wait Verification",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3780,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/verification/requests/' + encodeURIComponent($node['HTTP Create Verification Request'].json.id) + '/retry' }}",
+        "options": {}
+      },
+      "id": "http-retry-verification-request-1",
+      "name": "HTTP Retry Verification Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        4000,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "id": "wait-verification-retry-1",
+      "name": "Wait Verification Retry",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        4220,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/orchestrator/operations/' + $node['HTTP Retry Verification Request'].json.id }}",
+        "options": {}
+      },
+      "id": "http-get-verification-op-1",
+      "name": "HTTP Get Verification Retry Operation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        4440,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const status = String($json.status || '').toLowerCase();\nreturn [{\n  json: {\n    verification_retry_status: status,\n    verification_retry_terminal: ['succeeded', 'failed'].includes(status),\n    verification_retry_succeeded: status === 'succeeded'\n  }\n}];"
+      },
+      "id": "code-parse-verification-retry-status-1",
+      "name": "Parse Verification Retry Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4660,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "if-verification-terminal-cond-1",
+              "leftValue": "={{ $json.verification_retry_terminal }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-verification-terminal-1",
+      "name": "Verification Retry Terminal?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4880,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "if-verification-succeeded-cond-1",
+              "leftValue": "={{ $json.verification_retry_succeeded }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-verification-succeeded-1",
+      "name": "Verification Retry Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        5100,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/verification/captcha/events' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"vm_id\": $node['Set Input'].json.vm_id, \"provider\": $node['Set Input'].json.captcha_provider || 'google-recaptcha', \"status\": 'solved', \"source\": $node['Set Input'].json.captcha_source || 'n8n-verification-lane', \"score\": 92, \"latency_ms\": 3500, \"details\": 'Verification retry succeeded in n8n lane.' } }}",
+        "options": {}
+      },
+      "id": "http-create-captcha-event-success-1",
+      "name": "HTTP Create CAPTCHA Event Success",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        5320,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/verification/captcha/events' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"vm_id\": $node['Set Input'].json.vm_id, \"provider\": $node['Set Input'].json.captcha_provider || 'google-recaptcha', \"status\": 'failed', \"source\": $node['Set Input'].json.captcha_source || 'n8n-verification-lane', \"score\": 42, \"latency_ms\": 8500, \"details\": 'Verification retry failed in n8n lane.' } }}",
+        "options": {}
+      },
+      "id": "http-create-captcha-event-failure-1",
+      "name": "HTTP Create CAPTCHA Event Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        5320,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/verification/captcha/summary?hours=24' }}",
+        "options": {}
+      },
+      "id": "http-get-captcha-summary-1",
+      "name": "HTTP Get CAPTCHA Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        5540,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "if-captcha-healthy-cond-1",
+              "leftValue": "={{ $json.success_rate }}",
+              "rightValue": "49",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-captcha-healthy-1",
+      "name": "CAPTCHA Healthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        5760,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
         "url": "={{ $node['Set Input'].json.backend_url + '/api/v1/automation/scheduler/jobs' }}",
         "sendBody": true,
         "specifyBody": "json",
@@ -345,8 +611,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        3560,
-        80
+        5980,
+        -40
       ]
     },
     {
@@ -360,8 +626,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        3560,
-        300
+        5980,
+        240
       ]
     }
   ],
@@ -545,11 +811,164 @@
       "main": [
         [
           {
+            "node": "HTTP Create Verification Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Delete VM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Create Verification Request": {
+      "main": [
+        [
+          {
+            "node": "Wait Verification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Verification": {
+      "main": [
+        [
+          {
+            "node": "HTTP Retry Verification Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Retry Verification Request": {
+      "main": [
+        [
+          {
+            "node": "Wait Verification Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Verification Retry": {
+      "main": [
+        [
+          {
+            "node": "HTTP Get Verification Retry Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Get Verification Retry Operation": {
+      "main": [
+        [
+          {
+            "node": "Parse Verification Retry Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Verification Retry Status": {
+      "main": [
+        [
+          {
+            "node": "Verification Retry Terminal?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verification Retry Terminal?": {
+      "main": [
+        [
+          {
+            "node": "Verification Retry Succeeded?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait Verification Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verification Retry Succeeded?": {
+      "main": [
+        [
+          {
+            "node": "HTTP Create CAPTCHA Event Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Create CAPTCHA Event Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Create CAPTCHA Event Success": {
+      "main": [
+        [
+          {
+            "node": "HTTP Get CAPTCHA Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Get CAPTCHA Summary": {
+      "main": [
+        [
+          {
+            "node": "CAPTCHA Healthy?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CAPTCHA Healthy?": {
+      "main": [
+        [
+          {
             "node": "HTTP Queue Job",
             "type": "main",
             "index": 0
           }
         ],
+        [
+          {
+            "node": "HTTP Delete VM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Create CAPTCHA Event Failure": {
+      "main": [
         [
           {
             "node": "HTTP Delete VM",

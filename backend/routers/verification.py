@@ -2,7 +2,14 @@ from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
-from ..models import CaptchaEvent, CaptchaSummary, OperationStatus, VerificationRequest
+from ..models import (
+    CaptchaEvent,
+    CaptchaEventCreate,
+    CaptchaSummary,
+    OperationStatus,
+    VerificationRequest,
+    VerificationRequestCreate,
+)
 from ..repositories import StorageRepository
 from ..services.verification import VerificationService
 
@@ -18,6 +25,11 @@ async def get_requests(limit: int = 100, service: VerificationService = Depends(
     return service.list_requests(limit=limit)
 
 
+@router.post("/requests", response_model=VerificationRequest)
+async def create_request(payload: VerificationRequestCreate, service: VerificationService = Depends(get_service)):
+    return service.create_request(payload=payload)
+
+
 @router.post("/requests/{request_id}/retry", response_model=OperationStatus)
 async def retry_request(
     request_id: str,
@@ -30,6 +42,11 @@ async def retry_request(
 @router.get("/captcha/events", response_model=list[CaptchaEvent])
 async def get_captcha_events(limit: int = 100, service: VerificationService = Depends(get_service)):
     return service.list_captcha_events(limit=limit)
+
+
+@router.post("/captcha/events", response_model=CaptchaEvent)
+async def create_captcha_event(payload: CaptchaEventCreate, service: VerificationService = Depends(get_service)):
+    return service.create_captcha_event(payload=payload)
 
 
 @router.get("/captcha/summary", response_model=CaptchaSummary)

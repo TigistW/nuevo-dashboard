@@ -59,12 +59,41 @@ class VerificationApiIntegrationTest(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_verification_requests_retry_and_captcha_summary(self) -> None:
+        create_request_response = self.client.post(
+            "/api/v1/verification/requests",
+            json={
+                "vm_id": "vm-n8n-001",
+                "worker_id": "worker-vm-n8n-001",
+                "verification_type": "SMS",
+                "provider": "Twilio",
+                "destination": "+15550001111",
+            },
+        )
+        self.assertEqual(create_request_response.status_code, 200, create_request_response.text)
+        created_request = create_request_response.json()
+        self.assertEqual(created_request["status"], "Pending")
+
+        create_captcha_response = self.client.post(
+            "/api/v1/verification/captcha/events",
+            json={
+                "vm_id": "vm-n8n-001",
+                "provider": "google-recaptcha",
+                "status": "solved",
+                "source": "n8n-verification-lane",
+                "score": 90,
+                "latency_ms": 3500,
+                "details": "Initial captcha solved.",
+            },
+        )
+        self.assertEqual(create_captcha_response.status_code, 200, create_captcha_response.text)
+
         list_response = self.client.get("/api/v1/verification/requests")
         self.assertEqual(list_response.status_code, 200, list_response.text)
         requests_payload = list_response.json()
-        self.assertGreaterEqual(len(requests_payload), 3)
+        self.assertGreaterEqual(len(requests_payload), 4)
         self.assertTrue(any(item["verification_type"] == "SMS" for item in requests_payload))
         self.assertTrue(any(item["verification_type"] == "QR" for item in requests_payload))
+        self.assertTrue(any(item["id"] == created_request["id"] for item in requests_payload))
 
         summary_before = self.client.get("/api/v1/verification/captcha/summary")
         self.assertEqual(summary_before.status_code, 200, summary_before.text)

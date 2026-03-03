@@ -1,82 +1,251 @@
-
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from '../App';
+import {
+  ApiCentralizedLogEntry,
+  ApiHealingRule,
+  ApiProtectionState,
+  evaluateProtection,
+  getCentralizedLogs,
+  getProtectionState,
+  listHealingRules,
+  triggerSchedulerTick,
+  updateHealingRule,
+} from '../services/backendApi';
 
-interface HealingRule {
-  id: string;
-  trigger: string;
-  action: string;
-  enabled: boolean;
-}
+const HEALING_KEYWORDS = [
+  'reconnect',
+  'restart',
+  'retry',
+  'failsafe',
+  'protective mode',
+  'paused',
+  'resumed',
+  'deleted low-score vm',
+  'guardrail',
+  'recover',
+];
 
 const AutoHealing: React.FC = () => {
   const { t } = useTranslation();
-  const [rules, setRules] = useState<HealingRule[]>([
-    { id: '1', trigger: 'WireGuard Tunnel Down', action: 'Auto-Reconnect', enabled: true },
-    { id: '2', trigger: 'Endpoint Unreachable', action: 'Restart Micro-VM', enabled: true },
-    { id: '3', trigger: 'Public IP Mismatch', action: 'Recreate Instance', enabled: false },
-    { id: '4', trigger: 'RAM > 90%', action: 'Controlled Shutdown', enabled: true },
-  ]);
+  const [rules, setRules] = useState<ApiHealingRule[]>([]);
+  const [logs, setLogs] = useState<ApiCentralizedLogEntry[]>([]);
+  const [protection, setProtection] = useState<ApiProtectionState | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isBusy, setIsBusy] = useState<boolean>(false);
+  const [errorText, setErrorText] = useState<string>('');
+  const [infoText, setInfoText] = useState<string>('');
+
+  const refresh = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const [rulesRows, logRows, protectionState] = await Promise.all([
+        listHealingRules(),
+        getCentralizedLogs('All'),
+        getProtectionState(),
+      ]);
+      setRules(rulesRows);
+      setLogs(logRows);
+      setProtection(protectionState);
+      setErrorText('');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load auto-healing state.';
+      setErrorText(message);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const interval = window.setInterval(() => {
+      void refresh();
+    }, 7000);
+    return () => window.clearInterval(interval);
+  }, [refresh]);
+
+  const healingLogs = useMemo(() => {
+    return logs
+      .filter((item) => {
+        const text = `${item.source} ${item.msg} ${item.details || ''}`.toLowerCase();
+        return HEALING_KEYWORDS.some((keyword) => text.includes(keyword));
+      })
+      .slice(0, 20);
+  }, [logs]);
+
+  const handleEvaluate = useCallback(async () => {
+    setIsBusy(true);
+    try {
+      const state = await evaluateProtection(true);
+      setProtection(state);
+      setInfoText(`Protection evaluated: protective=${state.protective_mode}, failsafe=${state.failsafe_active}.`);
+      setErrorText('');
+      const updatedLogs = await getCentralizedLogs('All');
+      setLogs(updatedLogs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Protection evaluation failed.';
+      setErrorText(message);
+    } finally {
+      setIsBusy(false);
+    }
+  }, []);
+
+  const handleTick = useCallback(async () => {
+    setIsBusy(true);
+    try {
+      const result = await triggerSchedulerTick();
+      setInfoText(
+        `Scheduler tick dispatched=${result.dispatched}, warmup=${result.warmup_jobs_enqueued}, active=${result.active_jobs}.`
+      );
+      setErrorText('');
+      await refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Scheduler tick failed.';
+      setErrorText(message);
+    } finally {
+      setIsBusy(false);
+    }
+  }, [refresh]);
+
+  const handleToggleRule = useCallback(async (rule: ApiHealingRule) => {
+    setIsBusy(true);
+    try {
+      const updated = await updateHealingRule(rule.id, !rule.enabled);
+      setRules((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setInfoText(`Rule '${updated.id}' is now ${updated.enabled ? 'enabled' : 'disabled'}.`);
+      setErrorText('');
+      const updatedLogs = await getCentralizedLogs('All');
+      setLogs(updatedLogs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update healing rule.';
+      setErrorText(message);
+    } finally {
+      setIsBusy(false);
+    }
+  }, []);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-wrap justify-between items-center gap-3">
         <div>
           <h2 className="text-2xl font-black italic tracking-tighter uppercase">{t('autoHealing')}</h2>
-          <p className="text-sm text-slate-500 font-mono">Watchdog Service & Automatic Recovery</p>
+          <p className="text-sm text-slate-500 font-mono">Watchdog service and automatic recovery state</p>
         </div>
-        <div className="flex items-center gap-3 px-4 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-          <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">{t('watchdogStatus')}: ACTIVE</span>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-700 bg-slate-900/60">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                protection?.failsafe_active ? 'bg-rose-500' : protection?.protective_mode ? 'bg-amber-500' : 'bg-emerald-500'
+              }`}
+            />
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-300">
+              {t('watchdogStatus')}: {protection?.failsafe_active ? 'FAILSAFE' : protection?.protective_mode ? 'PROTECTIVE' : 'ACTIVE'}
+            </span>
+          </div>
+          <button
+            onClick={() => void refresh()}
+            disabled={isBusy}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded-xl text-xs font-bold border border-slate-700"
+          >
+            Refresh
+          </button>
+          <button
+            onClick={() => void handleEvaluate()}
+            disabled={isBusy}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-xl text-xs font-bold text-white"
+          >
+            Evaluate Protection
+          </button>
+          <button
+            onClick={() => void handleTick()}
+            disabled={isBusy}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-xl text-xs font-bold text-white"
+          >
+            Run Scheduler Tick
+          </button>
         </div>
       </div>
+
+      {errorText ? (
+        <div className="px-4 py-3 rounded-xl border border-rose-500/20 bg-rose-900/20 text-rose-300 text-sm">
+          {errorText}
+        </div>
+      ) : null}
+      {infoText ? (
+        <div className="px-4 py-3 rounded-xl border border-emerald-500/20 bg-emerald-900/20 text-emerald-300 text-sm">
+          {infoText}
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-6">
         <div className="bg-[#0d1225] border border-slate-800 rounded-3xl p-8">
           <h3 className="text-lg font-bold mb-6">{t('healingRules')}</h3>
           <div className="space-y-4">
-            {rules.map((rule) => (
-              <div key={rule.id} className="flex items-center justify-between p-6 bg-slate-900/50 rounded-2xl border border-slate-800 group hover:border-blue-500/30 transition-all">
-                <div className="flex items-center gap-6">
-                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-xl ${rule.enabled ? 'bg-blue-500/10 text-blue-500' : 'bg-slate-800 text-slate-500'}`}>
-                    {rule.enabled ? '🛡️' : '💤'}
-                  </div>
+            {isLoading ? (
+              <p className="text-sm text-slate-500">Loading healing rules...</p>
+            ) : rules.length === 0 ? (
+              <p className="text-sm text-slate-500">No healing rules found.</p>
+            ) : (
+              rules.map((rule) => (
+                <div
+                  key={rule.id}
+                  className="flex items-center justify-between p-5 bg-slate-900/50 rounded-2xl border border-slate-800"
+                >
                   <div>
                     <p className="text-sm font-bold text-slate-200">{rule.trigger}</p>
                     <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">Action: {rule.action}</p>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border ${
+                        rule.enabled
+                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                          : 'bg-slate-800 text-slate-500 border-slate-700'
+                      }`}
+                    >
+                      {rule.enabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                    <button
+                      onClick={() => void handleToggleRule(rule)}
+                      disabled={isBusy}
+                      className="px-3 py-1 rounded-lg text-[10px] font-black uppercase border border-blue-500/20 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 disabled:opacity-50"
+                    >
+                      Toggle
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-4">
-                  <button 
-                    onClick={() => setRules(rules.map(r => r.id === rule.id ? {...r, enabled: !r.enabled} : r))}
-                    className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${
-                      rule.enabled ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' : 'bg-slate-800 text-slate-500 border border-slate-700'
-                    }`}
-                  >
-                    {rule.enabled ? 'Enabled' : 'Disabled'}
-                  </button>
-                  <button className="p-2 hover:bg-slate-800 rounded-lg text-slate-500 transition-colors">⚙️</button>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
 
         <div className="bg-gradient-to-br from-blue-900/20 to-slate-900/20 border border-blue-500/20 rounded-3xl p-8">
           <h3 className="text-lg font-bold mb-4 italic uppercase tracking-tighter">Recent Healing Actions</h3>
           <div className="space-y-3">
-            {[
-              { time: '10:45:12', vm: 'vm-002', event: 'Tunnel Reconnect', status: 'Success' },
-              { time: '09:30:05', vm: 'vm-005', event: 'Memory Guardrail', status: 'Success' },
-              { time: '08:15:44', vm: 'vm-001', event: 'Health Check Failure', status: 'Success' },
-            ].map((log, i) => (
-              <div key={i} className="flex items-center justify-between text-[11px] font-mono py-2 border-b border-white/5 last:border-0">
-                <span className="text-slate-500">[{log.time}]</span>
-                <span className="text-blue-400 font-bold">{log.vm}</span>
-                <span className="text-slate-300">{log.event}</span>
-                <span className="text-emerald-500 font-black uppercase">{log.status}</span>
-              </div>
-            ))}
+            {healingLogs.length === 0 ? (
+              <p className="text-sm text-slate-500">No recent healing-related logs.</p>
+            ) : (
+              healingLogs.map((item, index) => (
+                <div
+                  key={`${item.time}-${item.source}-${index}`}
+                  className="flex flex-wrap items-center justify-between text-[11px] font-mono py-2 border-b border-white/5 last:border-0 gap-2"
+                >
+                  <span className="text-slate-500">[{item.time}]</span>
+                  <span className="text-blue-400 font-bold">{item.source}</span>
+                  <span className="text-slate-300 flex-1 min-w-[240px]">{item.msg}</span>
+                  <span
+                    className={`font-black uppercase ${
+                      item.level.toUpperCase() === 'ERROR'
+                        ? 'text-rose-500'
+                        : item.level.toUpperCase() === 'WARNING'
+                        ? 'text-amber-500'
+                        : 'text-emerald-500'
+                    }`}
+                  >
+                    {item.level}
+                  </span>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>
