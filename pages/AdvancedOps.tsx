@@ -296,9 +296,13 @@ const AdvancedOps: React.FC = () => {
               <button
                 onClick={() =>
                   void safeRun(async () => {
-                    const status = await startNotebookWorker();
+                    await startNotebookWorker();
+                    const status = await probeNotebookWorker();
                     setWorkerStatus(status);
-                    setInfoText(`Worker start requested. running=${String(status.running)}, playwright=${String(status.playwright_available)}`);
+                    await refreshByTab('notebook');
+                    setInfoText(
+                      `Worker started and probed. running=${String(status.running)}, managed=${status.managed_sessions}, playwright=${String(status.playwright_available)}`
+                    );
                   })
                 }
                 disabled={isBusy}

@@ -3,9 +3,10 @@ from __future__ import annotations
 import re
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..config import settings
 from ..database import SessionLocal
@@ -51,6 +52,7 @@ class _ManagedNotebook:
     vm_id: str
     account_email: str | None
     notebook_url: str
+    entry_url: str
     state: str = "idle"
     current_url: str | None = None
     last_probe_at: datetime | None = None
@@ -68,6 +70,8 @@ class ColabPlaywrightWorker:
         self._nav_timeout_ms = max(1000, int(settings.colab_worker_nav_timeout_ms))
         self._action_timeout_ms = max(500, int(settings.colab_worker_action_timeout_ms))
         self._browser_channel = (settings.colab_worker_browser_channel or "").strip()
+        self._auto_create_sessions = bool(settings.colab_worker_auto_create_sessions)
+        self._entry_url = (settings.colab_worker_entry_url or "").strip()
         self._storage_state_dir = self._resolve_storage_dir(settings.colab_worker_storage_state_dir)
 
         self._lock = threading.Lock()
@@ -147,6 +151,13 @@ class ColabPlaywrightWorker:
                 self._mark_probe_unavailable("Worker disabled by configuration.", probe_at)
                 return
             if not PLAYWRIGHT_AVAILABLE:
+                db = SessionLocal()
+                repo = StorageRepository(db)
+                try:
+                    if self._auto_create_sessions:
+                        self._auto_create_missing_sessions(repo)
+                finally:
+                    db.close()
                 self._mark_probe_unavailable(
                     "Playwright unavailable; install dependency to enable real notebook probing.",
                     probe_at,
@@ -156,7 +167,9 @@ class ColabPlaywrightWorker:
             db = SessionLocal()
             repo = StorageRepository(db)
             try:
-                rows = [row for row in repo.list_notebook_sessions() if (row.notebook_url or "").strip()]
+                if self._auto_create_sessions:
+                    self._auto_create_missing_sessions(repo)
+                rows = repo.list_notebook_sessions()
                 active_ids = {row.id for row in rows}
                 self._drop_stale_sessions(active_ids)
 
@@ -259,6 +272,8 @@ class ColabPlaywrightWorker:
 
             current_url = str(page.url or managed.notebook_url or "")
             managed.current_url = current_url or None
+            if current_url and self._is_colab_notebook_url(current_url):
+                managed.notebook_url = current_url
             body_text = self._extract_body_text(page)
             state, message = self._evaluate_state(page=page, current_url=current_url, body_text=body_text)
             managed.state = state
@@ -338,7 +353,7 @@ class ColabPlaywrightWorker:
         if managed.page is None or managed.page.is_closed():
             managed.page = managed.context.new_page()
 
-        desired_url = (managed.notebook_url or "").strip()
+        desired_url = (managed.notebook_url or "").strip() or (managed.entry_url or "").strip()
         if not desired_url:
             raise ValueError("Missing notebook URL for managed session.")
 
@@ -394,6 +409,7 @@ class ColabPlaywrightWorker:
                     vm_id=row.vm_id,
                     account_email=row.account_email,
                     notebook_url=(row.notebook_url or "").strip(),
+                    entry_url=self._entry_url,
                 )
                 self._sessions[row.id] = managed
                 return managed
@@ -405,11 +421,48 @@ class ColabPlaywrightWorker:
                 self._reset_managed_runtime(managed)
             return managed
 
+    def _auto_create_missing_sessions(self, repo: StorageRepository) -> None:
+        if not self._entry_url:
+            return
+        running_vms = [vm for vm in repo.list_vms() if str(vm.status or "").lower() == "running"]
+        now = datetime.utcnow()
+        for vm in running_vms:
+            existing = repo.list_notebook_sessions(vm_id=vm.id)
+            if existing:
+                continue
+            account = repo.find_assigned_account_by_vm(vm.id)
+            notebook_id = f"nb-auto-{vm.id}-{uuid4().hex[:8]}"
+            repo.create_notebook_session(
+                notebook_id=notebook_id,
+                vm_id=vm.id,
+                account_email=account.email if account is not None else None,
+                notebook_url=None,
+                status="Pending",
+                gpu_assigned_gb=12.0,
+                gpu_usage_gb=0.0,
+                ram_usage_gb=0.0,
+                load_percent=0,
+                cycle_state="active",
+                next_transition_at=now,
+                session_expires_at=now + timedelta(hours=8),
+                warning_message="Auto-created notebook session; waiting for worker open.",
+                last_probe_at=None,
+                last_probe_message=None,
+                restart_count=0,
+                risk_score=0,
+            )
+            repo.add_log(
+                "Notebook",
+                "INFO",
+                f"Auto-created notebook session for VM '{vm.id}'.",
+                "Worker bootstrap auto-create.",
+            )
+
     def _mark_probe_unavailable(self, message: str, probe_at: datetime) -> None:
         db = SessionLocal()
         repo = StorageRepository(db)
         try:
-            rows = [row for row in repo.list_notebook_sessions() if (row.notebook_url or "").strip()]
+            rows = repo.list_notebook_sessions()
             for row in rows:
                 repo.update_notebook_session(
                     row,
@@ -423,6 +476,13 @@ class ColabPlaywrightWorker:
 
         with self._lock:
             self._last_error = message
+
+    @staticmethod
+    def _is_colab_notebook_url(url: str) -> bool:
+        candidate = (url or "").strip().lower()
+        return "colab.research.google.com" in candidate and any(
+            marker in candidate for marker in ("/drive/", "/notebook/", "/github/")
+        )
 
     def _reset_managed_runtime(self, managed: _ManagedNotebook) -> None:
         self._close_managed(managed)

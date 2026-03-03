@@ -65,6 +65,8 @@ class Settings:
     colab_worker_action_timeout_ms: int = int(os.getenv("COLAB_WORKER_ACTION_TIMEOUT_MS", "4000"))
     colab_worker_storage_state_dir: str = os.getenv("COLAB_WORKER_STORAGE_STATE_DIR", "./backend/.state/colab")
     colab_worker_browser_channel: str = os.getenv("COLAB_WORKER_BROWSER_CHANNEL", "")
+    colab_worker_auto_create_sessions: bool = _env_bool("COLAB_WORKER_AUTO_CREATE_SESSIONS", True)
+    colab_worker_entry_url: str = os.getenv("COLAB_WORKER_ENTRY_URL", "https://colab.new")
 
 
 settings = Settings()
