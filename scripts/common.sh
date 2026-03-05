@@ -263,12 +263,19 @@ should_prepare_proxy_config() {
   return 0
 }
 
+detect_openvpn_tun_iface() {
+  local service_name="${1:-$PROXY_SERVICE_NAME}"
+  proxy_compose exec -T "$service_name" sh -lc "ip -o link show 2>/dev/null | awk -F': ' '\$2 ~ /^tun[0-9]+(@.*)?$/ {sub(/@.*/, \"\", \$2); print \$2; exit}'" 2>/dev/null | tr -d '\r' | head -n 1
+}
+
 wait_for_openvpn_tun() {
   local service_name="${1:-$PROXY_SERVICE_NAME}"
   local timeout="${2:-60}"
   local i=0
+  local tun_iface=""
   while [[ "$i" -lt "$timeout" ]]; do
-    if proxy_compose exec -T "$service_name" sh -lc "ip link show tun0 >/dev/null 2>&1"; then
+    tun_iface="$(detect_openvpn_tun_iface "$service_name")"
+    if [[ -n "$tun_iface" ]]; then
       return 0
     fi
     sleep 1

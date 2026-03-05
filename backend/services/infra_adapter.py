@@ -602,7 +602,7 @@ class InfrastructureAdapter:
     @staticmethod
     def _detect_provider(command_runs: Sequence[CommandRun]) -> str:
         joined = " ".join(" ".join(run.command).lower() for run in command_runs)
-        if "openvpn" in joined or "proxy" in joined or "tun0" in joined:
+        if "openvpn" in joined or "proxy" in joined or re.search(r"\btun\d+\b", joined):
             return "OpenVPN"
         if "wg" in joined:
             return "WireGuard"

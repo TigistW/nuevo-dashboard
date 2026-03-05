@@ -35,5 +35,10 @@ if ! wait_for_openvpn_tun "$SERVICE_NAME" 60; then
   exit 1
 fi
 
-proxy_compose exec -T "$SERVICE_NAME" sh -lc "ip -4 addr show tun0 || true"
+TUN_IFACE="$(detect_openvpn_tun_iface "$SERVICE_NAME")"
+if [[ -n "$TUN_IFACE" ]]; then
+  proxy_compose exec -T "$SERVICE_NAME" sh -lc "ip -4 addr show '$TUN_IFACE' || true"
+else
+  echo "No tun interface detected for service $SERVICE_NAME" >&2
+fi
 proxy_compose exec -T "$SERVICE_NAME" sh -lc "curl -4 -s https://ifconfig.me || true"

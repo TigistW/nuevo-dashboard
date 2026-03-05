@@ -291,13 +291,30 @@ def _prepare_proxy_config(profile: str) -> None:
     shutil.copyfile(src, dst)
 
 
+def _find_tun_interface(service_name: str) -> str:
+    probe = _proxy_compose(
+        [
+            "exec",
+            "-T",
+            service_name,
+            "sh",
+            "-lc",
+            "ip -o link show 2>/dev/null | awk -F': ' '$2 ~ /^tun[0-9]+(@.*)?$/ {sub(/@.*/, \"\", $2); print $2; exit}'",
+        ],
+        check=False,
+    )
+    if probe.returncode != 0:
+        return ""
+    for line in probe.stdout.splitlines():
+        iface = line.strip()
+        if iface:
+            return iface
+    return ""
+
+
 def _wait_for_tun(service_name: str, timeout_seconds: int = 60) -> None:
     for _ in range(timeout_seconds):
-        probe = _proxy_compose(
-            ["exec", "-T", service_name, "sh", "-lc", "ip link show tun0 >/dev/null 2>&1"],
-            check=False,
-        )
-        if probe.returncode == 0:
+        if _find_tun_interface(service_name):
             return
         time.sleep(1)
     raise HTTPException(status_code=500, detail=f"OpenVPN tunnel did not come up for service {service_name}")
