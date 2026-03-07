@@ -10,13 +10,12 @@ import {
   listMicroVms,
   listVerificationRequests,
   retryVerificationRequest,
-  rotateVmTunnel,
   syncFingerprint,
   terminalCommand,
   testIsolation,
 } from '../services/backendApi';
 
-type WorkflowStepKey = 'create' | 'network' | 'fingerprint' | 'verify' | 'command';
+type WorkflowStepKey = 'create' | 'fingerprint' | 'verify' | 'command';
 type StepStatus = 'idle' | 'running' | 'done' | 'failed';
 
 type StepState = {
@@ -65,7 +64,6 @@ const DEFAULT_VERIFICATION_FORM: VerificationForm = {
 
 const STEP_DEFINITIONS: Array<{ key: WorkflowStepKey; label: string; enabled: boolean }> = [
   { key: 'create', label: 'Create VM', enabled: true },
-  { key: 'network', label: 'Assign IP', enabled: true },
   { key: 'fingerprint', label: 'Sync fingerprint', enabled: true },
   { key: 'verify', label: 'Run verification checks', enabled: true },
   { key: 'command', label: 'Run terminal command', enabled: false },
@@ -243,20 +241,6 @@ const AutomationConsole: React.FC = () => {
           continue;
         }
 
-        if (step.key === 'network') {
-          if (!currentVmId) {
-            throw new Error('No VM available for IP assignment.');
-          }
-          const operation = await rotateVmTunnel(currentVmId);
-          await waitForOperationSuccess(operation.id, 360_000);
-          const vm = await waitForVmReady(currentVmId, true);
-          currentIp = vm.public_ip || '';
-          setWorkflowVmId(vm.id);
-          setWorkflowIp(currentIp);
-          updateStep(step.key, { status: 'done', message: `IP ready: ${currentIp}` });
-          continue;
-        }
-
         if (step.key === 'fingerprint') {
           if (!currentVmId) {
             throw new Error('No VM available for fingerprint sync.');
@@ -384,8 +368,8 @@ const AutomationConsole: React.FC = () => {
             <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-sky-400/80">Workflow builder</p>
             <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-white">Run a focused pipeline</h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-              A reduced workflow runner for the exact chain you asked to keep: create a VM, assign IP, sync fingerprint,
-              verify the environment, and optionally run one command.
+              A reduced workflow runner for the exact chain you asked to keep: create a VM, sync fingerprint, verify
+              the environment, and optionally run one command.
             </p>
           </div>
           <button
