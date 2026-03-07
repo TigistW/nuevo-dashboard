@@ -14,13 +14,13 @@ import {
   terminalCommand,
   testIsolation,
 } from '../services/backendApi';
+import { useTranslation } from '../App';
 
 type WorkflowStepKey = 'create' | 'fingerprint' | 'verify' | 'command';
 type StepStatus = 'idle' | 'running' | 'done' | 'failed';
 
 type StepState = {
   key: WorkflowStepKey;
-  label: string;
   enabled: boolean;
   status: StepStatus;
   message: string;
@@ -62,11 +62,11 @@ const DEFAULT_VERIFICATION_FORM: VerificationForm = {
   destination: '',
 };
 
-const STEP_DEFINITIONS: Array<{ key: WorkflowStepKey; label: string; enabled: boolean }> = [
-  { key: 'create', label: 'Create VM', enabled: true },
-  { key: 'fingerprint', label: 'Sync fingerprint', enabled: true },
-  { key: 'verify', label: 'Run verification checks', enabled: true },
-  { key: 'command', label: 'Run terminal command', enabled: false },
+const STEP_DEFINITIONS: Array<{ key: WorkflowStepKey; enabled: boolean }> = [
+  { key: 'create', enabled: true },
+  { key: 'fingerprint', enabled: true },
+  { key: 'verify', enabled: true },
+  { key: 'command', enabled: false },
 ];
 
 function delay(ms: number): Promise<void> {
@@ -82,14 +82,20 @@ function generateVmId(): string {
 function createInitialStepState(): StepState[] {
   return STEP_DEFINITIONS.map((step) => ({
     key: step.key,
-    label: step.label,
     enabled: step.enabled,
     status: 'idle',
     message: '',
   }));
 }
 
-async function waitForOperationSuccess(operationId: string, timeoutMs = 180_000): Promise<ApiOperationStatus> {
+async function waitForOperationSuccess(
+  operationId: string,
+  messages: {
+    operationFailed: (operationId: string) => string;
+    operationTimedOut: (operationId: string) => string;
+  },
+  timeoutMs = 180_000
+): Promise<ApiOperationStatus> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const operation = await getOperation(operationId);
@@ -98,14 +104,21 @@ async function waitForOperationSuccess(operationId: string, timeoutMs = 180_000)
       return operation;
     }
     if (status === 'failed') {
-      throw new Error(operation.message || `Operation '${operationId}' failed.`);
+      throw new Error(operation.message || messages.operationFailed(operationId));
     }
     await delay(1000);
   }
-  throw new Error(`Timed out waiting for operation '${operationId}'.`);
+  throw new Error(messages.operationTimedOut(operationId));
 }
 
-async function waitForVmReady(vmId: string, requirePublicIp: boolean): Promise<ApiMicroVm> {
+async function waitForVmReady(
+  vmId: string,
+  requirePublicIp: boolean,
+  messages: {
+    vmTerminalState: (vmId: string, status: string) => string;
+    vmTimedOut: (vmId: string) => string;
+  }
+): Promise<ApiMicroVm> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 180_000) {
     const vms = await listMicroVms();
@@ -114,7 +127,7 @@ async function waitForVmReady(vmId: string, requirePublicIp: boolean): Promise<A
       const status = (vm.status || '').toLowerCase();
       const ip = (vm.public_ip || '').trim().toLowerCase();
       if (status.includes('error') || status.includes('deleted')) {
-        throw new Error(`VM '${vmId}' entered terminal state '${vm.status}'.`);
+        throw new Error(messages.vmTerminalState(vmId, vm.status));
       }
       if (status.includes('running') && (!requirePublicIp || (ip && ip !== 'pending'))) {
         return vm;
@@ -122,7 +135,7 @@ async function waitForVmReady(vmId: string, requirePublicIp: boolean): Promise<A
     }
     await delay(1000);
   }
-  throw new Error(`Timed out waiting for VM '${vmId}'.`);
+  throw new Error(messages.vmTimedOut(vmId));
 }
 
 function formatDate(value?: string | null): string {
@@ -137,6 +150,7 @@ function formatDate(value?: string | null): string {
 }
 
 const AutomationConsole: React.FC = () => {
+  const { language } = useTranslation();
   const [vms, setVms] = useState<ApiMicroVm[]>([]);
   const [verificationRequests, setVerificationRequests] = useState<ApiVerificationRequest[]>([]);
   const [workflowForm, setWorkflowForm] = useState<WorkflowForm>(DEFAULT_WORKFLOW_FORM);
@@ -153,6 +167,278 @@ const AutomationConsole: React.FC = () => {
   const [workflowIp, setWorkflowIp] = useState<string>('');
   const [commandOutput, setCommandOutput] = useState<string>('');
 
+  const copy = useMemo(
+    () =>
+      language === 'en'
+        ? {
+            errors: {
+              loadWorkflowData: 'Failed to load workflow data.',
+              enableOneStep: 'Enable at least one workflow step.',
+              vmIdRequiredWhenCreateDisabled: 'VM ID is required when Create VM is disabled.',
+              noVmForFingerprint: 'No VM available for fingerprint sync.',
+              noVmForVerification: 'No VM available for verification.',
+              noVmForCommand: 'No VM available for terminal command.',
+              operationFailed: (operationId: string) => `Operation '${operationId}' failed.`,
+              operationTimedOut: (operationId: string) => `Timed out waiting for operation '${operationId}'.`,
+              vmTerminalState: (vmId: string, status: string) => `VM '${vmId}' entered terminal state '${status}'.`,
+              vmTimedOut: (vmId: string) => `Timed out waiting for VM '${vmId}'.`,
+              workflowFailed: 'Workflow failed.',
+              fingerprintSyncFailed: (vmId: string) => `Failed to sync fingerprint for ${vmId}.`,
+              verificationRequestFailed: 'Failed to create verification request.',
+              retryFailed: (requestId: string) => `Retry failed for request ${requestId}.`,
+              verificationFailed: (dnsStatus: string, isolationStatus: string, isolationDetails?: string) =>
+                `Verification failed (dns=${dnsStatus}, isolation=${isolationStatus}${
+                  isolationDetails ? `: ${isolationDetails}` : ''
+                }).`,
+            },
+            info: {
+              workflowCompleted: (vmId: string) => `Workflow completed for ${vmId || 'selected VM'}.`,
+              runningWithIp: (ip: string) => `Running with ${ip}`,
+              vmRunning: 'VM is running.',
+              fingerprintSynced: 'Fingerprint synced.',
+              dnsAndIsolationPassed: 'DNS and isolation checks passed.',
+              commandExecuted: (command: string) => `Executed '${command}'.`,
+              fingerprintSyncedForVm: (vmId: string) => `Fingerprint synced for ${vmId}.`,
+              verificationCreated: (vmId: string) => `Verification request created for ${vmId}.`,
+              retryCompleted: (requestId: string) => `Retry completed for request ${requestId}.`,
+            },
+            stepLabels: {
+              create: 'Create VM',
+              fingerprint: 'Sync fingerprint',
+              verify: 'Run verification checks',
+              command: 'Run terminal command',
+            } as Record<WorkflowStepKey, string>,
+            stepStatuses: {
+              idle: 'Idle',
+              running: 'Running',
+              done: 'Done',
+              failed: 'Failed',
+            } as Record<StepStatus, string>,
+            workflow: {
+              kicker: 'Workflow builder',
+              title: 'Run a focused pipeline',
+              description:
+                'A reduced workflow runner for the exact chain you asked to keep: create a VM, sync fingerprint, verify the environment, and optionally run one command.',
+              refresh: 'Refresh data',
+              vmId: 'VM ID',
+              vmIdPlaceholder: 'Leave empty to auto-generate on create',
+              generate: 'Generate',
+              country: 'Country',
+              ram: 'RAM',
+              cpu: 'CPU',
+              template: 'Template',
+              command: 'Command',
+              stepsTitle: 'Pipeline steps',
+              stepsDescription: 'Turn steps on or off, then run the sequence.',
+              runWorkflow: 'Run workflow',
+              runningWorkflow: 'Running',
+              commandOutput: 'Command output',
+              targetTitle: 'Current workflow target',
+              targetVm: 'VM',
+              targetPublicIp: 'Public IP',
+              targetLoadedVms: 'Loaded VMs',
+              loading: 'Loading...',
+              pending: 'Pending',
+            },
+            fingerprint: {
+              kicker: 'Fingerprint',
+              title: 'Sync by VM',
+              description: 'Use this only for the VMs you need to align.',
+              vm: 'VM',
+              ip: 'IP',
+              state: 'State',
+              fingerprint: 'Fingerprint',
+              action: 'Action',
+              loading: 'Loading VMs...',
+              empty: 'No VMs available.',
+              sync: 'Sync',
+              syncing: 'Syncing',
+            },
+            verification: {
+              kicker: 'SMS and QR',
+              title: 'Verification requests',
+              description:
+                'This section only keeps the SMS and QR flows. CAPTCHA widgets and related analytics are removed from the dashboard.',
+              vmId: 'VM ID',
+              workerId: 'Worker ID',
+              type: 'Type',
+              provider: 'Provider',
+              destination: 'Destination',
+              destinationPlaceholder: 'Phone number or QR session reference',
+              createRequest: 'Create request',
+              creating: 'Creating',
+              request: 'Request',
+              vm: 'VM',
+              status: 'Status',
+              action: 'Action',
+              loading: 'Loading requests...',
+              empty: 'No SMS or QR requests yet.',
+              retry: 'Retry',
+              retrying: 'Retrying',
+            },
+            states: {
+              pending: 'Pending',
+              unknown: 'Unknown',
+              secure: 'Secure',
+              warning: 'Warning',
+              verified: 'Verified',
+              failed: 'Failed',
+              creating: 'Creating',
+              running: 'Running',
+              error: 'Error',
+              stopping: 'Stopping',
+              stopped: 'Stopped',
+              restarting: 'Restarting',
+              deleting: 'Deleting',
+              deleted: 'Deleted',
+              passed: 'Passed',
+              completed: 'Completed',
+              succeeded: 'Succeeded',
+              processing: 'Processing',
+              requested: 'Requested',
+              in_progress: 'In progress',
+            } as Record<string, string>,
+          }
+        : {
+            errors: {
+              loadWorkflowData: 'No se pudieron cargar los datos del flujo.',
+              enableOneStep: 'Activa al menos un paso del flujo.',
+              vmIdRequiredWhenCreateDisabled: 'El ID de VM es obligatorio cuando Crear VM esta desactivado.',
+              noVmForFingerprint: 'No hay una VM disponible para sincronizar la huella.',
+              noVmForVerification: 'No hay una VM disponible para verificacion.',
+              noVmForCommand: 'No hay una VM disponible para ejecutar el comando.',
+              operationFailed: (operationId: string) => `La operacion '${operationId}' fallo.`,
+              operationTimedOut: (operationId: string) => `Se agoto el tiempo de espera para la operacion '${operationId}'.`,
+              vmTerminalState: (vmId: string, status: string) => `La VM '${vmId}' entro en el estado terminal '${status}'.`,
+              vmTimedOut: (vmId: string) => `Se agoto el tiempo de espera para la VM '${vmId}'.`,
+              workflowFailed: 'El flujo fallo.',
+              fingerprintSyncFailed: (vmId: string) => `No se pudo sincronizar la huella de ${vmId}.`,
+              verificationRequestFailed: 'No se pudo crear la solicitud de verificacion.',
+              retryFailed: (requestId: string) => `No se pudo reintentar la solicitud ${requestId}.`,
+              verificationFailed: (dnsStatus: string, isolationStatus: string, isolationDetails?: string) =>
+                `La verificacion fallo (dns=${dnsStatus}, aislamiento=${isolationStatus}${
+                  isolationDetails ? `: ${isolationDetails}` : ''
+                }).`,
+            },
+            info: {
+              workflowCompleted: (vmId: string) => `Flujo completado para ${vmId || 'la VM seleccionada'}.`,
+              runningWithIp: (ip: string) => `En ejecucion con ${ip}`,
+              vmRunning: 'La VM esta en ejecucion.',
+              fingerprintSynced: 'Huella sincronizada.',
+              dnsAndIsolationPassed: 'Las comprobaciones de DNS y aislamiento pasaron.',
+              commandExecuted: (command: string) => `Se ejecuto '${command}'.`,
+              fingerprintSyncedForVm: (vmId: string) => `Huella sincronizada para ${vmId}.`,
+              verificationCreated: (vmId: string) => `Solicitud de verificacion creada para ${vmId}.`,
+              retryCompleted: (requestId: string) => `Reintento completado para la solicitud ${requestId}.`,
+            },
+            stepLabels: {
+              create: 'Crear VM',
+              fingerprint: 'Sincronizar huella',
+              verify: 'Ejecutar comprobaciones de verificacion',
+              command: 'Ejecutar comando de terminal',
+            } as Record<WorkflowStepKey, string>,
+            stepStatuses: {
+              idle: 'Inactivo',
+              running: 'En curso',
+              done: 'Hecho',
+              failed: 'Fallido',
+            } as Record<StepStatus, string>,
+            workflow: {
+              kicker: 'Constructor de flujo',
+              title: 'Ejecutar una canalizacion enfocada',
+              description:
+                'Un ejecutor reducido para la cadena que pediste mantener: crear una VM, sincronizar huella, verificar el entorno y, si hace falta, ejecutar un comando.',
+              refresh: 'Actualizar datos',
+              vmId: 'ID de VM',
+              vmIdPlaceholder: 'Dejalo vacio para generarlo al crear',
+              generate: 'Generar',
+              country: 'Pais',
+              ram: 'RAM',
+              cpu: 'CPU',
+              template: 'Plantilla',
+              command: 'Comando',
+              stepsTitle: 'Pasos de la canalizacion',
+              stepsDescription: 'Activa o desactiva pasos y luego ejecuta la secuencia.',
+              runWorkflow: 'Ejecutar flujo',
+              runningWorkflow: 'Ejecutando',
+              commandOutput: 'Salida del comando',
+              targetTitle: 'Objetivo actual del flujo',
+              targetVm: 'VM',
+              targetPublicIp: 'IP publica',
+              targetLoadedVms: 'VMs cargadas',
+              loading: 'Cargando...',
+              pending: 'Pendiente',
+            },
+            fingerprint: {
+              kicker: 'Huella',
+              title: 'Sincronizar por VM',
+              description: 'Usa esto solo para las VMs que necesites alinear.',
+              vm: 'VM',
+              ip: 'IP',
+              state: 'Estado',
+              fingerprint: 'Huella',
+              action: 'Accion',
+              loading: 'Cargando VMs...',
+              empty: 'No hay VMs disponibles.',
+              sync: 'Sincronizar',
+              syncing: 'Sincronizando',
+            },
+            verification: {
+              kicker: 'SMS y QR',
+              title: 'Solicitudes de verificacion',
+              description:
+                'Esta seccion conserva solo los flujos de SMS y QR. Los widgets de CAPTCHA y sus analiticas fueron retirados del panel.',
+              vmId: 'ID de VM',
+              workerId: 'ID del worker',
+              type: 'Tipo',
+              provider: 'Proveedor',
+              destination: 'Destino',
+              destinationPlaceholder: 'Numero telefonico o referencia de sesion QR',
+              createRequest: 'Crear solicitud',
+              creating: 'Creando',
+              request: 'Solicitud',
+              vm: 'VM',
+              status: 'Estado',
+              action: 'Accion',
+              loading: 'Cargando solicitudes...',
+              empty: 'Todavia no hay solicitudes de SMS o QR.',
+              retry: 'Reintentar',
+              retrying: 'Reintentando',
+            },
+            states: {
+              pending: 'Pendiente',
+              unknown: 'Desconocido',
+              secure: 'Seguro',
+              warning: 'Advertencia',
+              verified: 'Verificado',
+              failed: 'Fallido',
+              creating: 'Creando',
+              running: 'En ejecucion',
+              error: 'Error',
+              stopping: 'Deteniendo',
+              stopped: 'Detenida',
+              restarting: 'Reiniciando',
+              deleting: 'Eliminando',
+              deleted: 'Eliminada',
+              passed: 'Aprobado',
+              completed: 'Completado',
+              succeeded: 'Exito',
+              processing: 'Procesando',
+              requested: 'Solicitado',
+              in_progress: 'En curso',
+            } as Record<string, string>,
+          },
+    [language]
+  );
+
+  const translateCommonState = useCallback(
+    (value?: string | null) => {
+      const key = String(value || '').trim().toLowerCase();
+      return copy.states[key] || value || copy.states.unknown;
+    },
+    [copy]
+  );
+
   const refreshData = useCallback(async () => {
     setIsLoading(true);
     try {
@@ -161,12 +447,12 @@ const AutomationConsole: React.FC = () => {
       setVerificationRequests(requestRows);
       setErrorText('');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load workflow data.';
+      const message = error instanceof Error ? error.message : copy.errors.loadWorkflowData;
       setErrorText(message);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [copy.errors.loadWorkflowData]);
 
   useEffect(() => {
     void refreshData();
@@ -211,10 +497,10 @@ const AutomationConsole: React.FC = () => {
 
     try {
       if (!enabledSteps.length) {
-        throw new Error('Enable at least one workflow step.');
+        throw new Error(copy.errors.enableOneStep);
       }
       if (!currentVmId && !enabledSteps.some((step) => step.key === 'create')) {
-        throw new Error('VM ID is required when Create VM is disabled.');
+        throw new Error(copy.errors.vmIdRequiredWhenCreateDisabled);
       }
 
       for (const step of enabledSteps) {
@@ -230,60 +516,69 @@ const AutomationConsole: React.FC = () => {
             cpu: workflowForm.cpu.trim(),
             template_id: workflowForm.templateId.trim(),
           });
-          const vm = await waitForVmReady(currentVmId, false);
+          const vm = await waitForVmReady(currentVmId, false, {
+            vmTerminalState: copy.errors.vmTerminalState,
+            vmTimedOut: copy.errors.vmTimedOut,
+          });
           currentIp = vm.public_ip || '';
           setWorkflowVmId(vm.id);
           setWorkflowIp(currentIp);
           updateStep(step.key, {
             status: 'done',
-            message: currentIp && currentIp.toLowerCase() !== 'pending' ? `Running with ${currentIp}` : 'VM is running.',
+            message:
+              currentIp && currentIp.toLowerCase() !== 'pending'
+                ? copy.info.runningWithIp(currentIp)
+                : copy.info.vmRunning,
           });
           continue;
         }
 
         if (step.key === 'fingerprint') {
           if (!currentVmId) {
-            throw new Error('No VM available for fingerprint sync.');
+            throw new Error(copy.errors.noVmForFingerprint);
           }
           const operation = await syncFingerprint(currentVmId);
-          await waitForOperationSuccess(operation.id, 120_000);
-          updateStep(step.key, { status: 'done', message: 'Fingerprint synced.' });
+          await waitForOperationSuccess(
+            operation.id,
+            {
+              operationFailed: copy.errors.operationFailed,
+              operationTimedOut: copy.errors.operationTimedOut,
+            },
+            120_000
+          );
+          updateStep(step.key, { status: 'done', message: copy.info.fingerprintSynced });
           continue;
         }
 
         if (step.key === 'verify') {
           if (!currentVmId) {
-            throw new Error('No VM available for verification.');
+            throw new Error(copy.errors.noVmForVerification);
           }
           const [dns, isolation] = await Promise.all([dnsLeakTest(currentVmId), testIsolation(currentVmId)]);
           const dnsOk = (dns.status || '').toLowerCase() === 'secure';
           const isoOk = (isolation.status || '').toLowerCase() === 'passed';
           if (!dnsOk || !isoOk) {
-            throw new Error(
-              `Verification failed (dns=${dns.status}, isolation=${isolation.status}${
-                isolation.details ? `: ${isolation.details}` : ''
-              }).`
-            );
+            throw new Error(copy.errors.verificationFailed(dns.status, isolation.status, isolation.details));
           }
-          updateStep(step.key, { status: 'done', message: 'DNS and isolation checks passed.' });
+          updateStep(step.key, { status: 'done', message: copy.info.dnsAndIsolationPassed });
           continue;
         }
 
         if (step.key === 'command') {
           if (!currentVmId) {
-            throw new Error('No VM available for terminal command.');
+            throw new Error(copy.errors.noVmForCommand);
           }
           const command = workflowForm.command.trim() || 'status';
           const response = await terminalCommand(currentVmId, command);
           setCommandOutput(response.output || '');
-          updateStep(step.key, { status: 'done', message: `Executed '${command}'.` });
+          updateStep(step.key, { status: 'done', message: copy.info.commandExecuted(command) });
         }
       }
 
-      setInfoText(`Workflow completed for ${currentVmId || 'selected VM'}.`);
+      setInfoText(copy.info.workflowCompleted(currentVmId));
       await refreshData();
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Workflow failed.';
+      const message = error instanceof Error ? error.message : copy.errors.workflowFailed;
       if (currentStepKey) {
         updateStep(currentStepKey, { status: 'failed', message });
       }
@@ -291,25 +586,32 @@ const AutomationConsole: React.FC = () => {
     } finally {
       setIsWorkflowRunning(false);
     }
-  }, [refreshData, steps, updateStep, workflowForm]);
+  }, [copy, refreshData, steps, updateStep, workflowForm]);
 
   const handleFingerprintSync = useCallback(
     async (vmId: string) => {
       setBusyFingerprintVm(vmId);
       try {
         const operation = await syncFingerprint(vmId);
-        await waitForOperationSuccess(operation.id, 120_000);
-        setInfoText(`Fingerprint synced for ${vmId}.`);
+        await waitForOperationSuccess(
+          operation.id,
+          {
+            operationFailed: copy.errors.operationFailed,
+            operationTimedOut: copy.errors.operationTimedOut,
+          },
+          120_000
+        );
+        setInfoText(copy.info.fingerprintSyncedForVm(vmId));
         setErrorText('');
         await refreshData();
       } catch (error) {
-        const message = error instanceof Error ? error.message : `Failed to sync fingerprint for ${vmId}.`;
+        const message = error instanceof Error ? error.message : copy.errors.fingerprintSyncFailed(vmId);
         setErrorText(message);
       } finally {
         setBusyFingerprintVm('');
       }
     },
-    [refreshData]
+    [copy, refreshData]
   );
 
   const handleCreateVerification = useCallback(
@@ -325,7 +627,7 @@ const AutomationConsole: React.FC = () => {
           provider: verificationForm.provider.trim(),
           destination: verificationForm.destination.trim(),
         });
-        setInfoText(`Verification request created for ${verificationForm.vm_id}.`);
+        setInfoText(copy.info.verificationCreated(verificationForm.vm_id));
         setErrorText('');
         setVerificationForm((prev) => ({
           ...prev,
@@ -333,13 +635,13 @@ const AutomationConsole: React.FC = () => {
         }));
         await refreshData();
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to create verification request.';
+        const message = error instanceof Error ? error.message : copy.errors.verificationRequestFailed;
         setErrorText(message);
       } finally {
         setCreatingVerification(false);
       }
     },
-    [refreshData, verificationForm]
+    [copy, refreshData, verificationForm]
   );
 
   const handleRetry = useCallback(
@@ -347,36 +649,42 @@ const AutomationConsole: React.FC = () => {
       setRetryingId(requestId);
       try {
         const operation = await retryVerificationRequest(requestId);
-        await waitForOperationSuccess(operation.id, 120_000);
-        setInfoText(`Retry completed for request ${requestId}.`);
+        await waitForOperationSuccess(
+          operation.id,
+          {
+            operationFailed: copy.errors.operationFailed,
+            operationTimedOut: copy.errors.operationTimedOut,
+          },
+          120_000
+        );
+        setInfoText(copy.info.retryCompleted(requestId));
         setErrorText('');
         await refreshData();
       } catch (error) {
-        const message = error instanceof Error ? error.message : `Retry failed for request ${requestId}.`;
+        const message = error instanceof Error ? error.message : copy.errors.retryFailed(requestId);
         setErrorText(message);
       } finally {
         setRetryingId('');
       }
     },
-    [refreshData]
+    [copy, refreshData]
   );
   return (
     <div className="space-y-6">
       <section className="rounded-[28px] border border-slate-800 bg-slate-950/75 p-6 shadow-[0_24px_80px_rgba(2,6,23,0.45)]">
         <div className="flex flex-col gap-4 border-b border-slate-800 pb-5 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-sky-400/80">Workflow builder</p>
-            <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-white">Run a focused pipeline</h2>
+            <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-sky-400/80">{copy.workflow.kicker}</p>
+            <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-white">{copy.workflow.title}</h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-              A reduced workflow runner for the exact chain you asked to keep: create a VM, sync fingerprint, verify
-              the environment, and optionally run one command.
+              {copy.workflow.description}
             </p>
           </div>
           <button
             onClick={() => void refreshData()}
             className="rounded-full border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-slate-600 hover:text-white"
           >
-            Refresh data
+            {copy.workflow.refresh}
           </button>
         </div>
 
@@ -395,12 +703,12 @@ const AutomationConsole: React.FC = () => {
           <div className="space-y-5">
             <div className="grid gap-4 md:grid-cols-2">
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">VM ID</span>
+                <span className="font-semibold text-slate-200">{copy.workflow.vmId}</span>
                 <div className="flex gap-2">
                   <input
                     value={workflowForm.vmId}
                     onChange={(event) => setWorkflowForm((prev) => ({ ...prev, vmId: event.target.value }))}
-                    placeholder="Leave empty to auto-generate on create"
+                    placeholder={copy.workflow.vmIdPlaceholder}
                     className="w-full rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm text-white outline-none transition focus:border-sky-500/40"
                   />
                   <button
@@ -408,13 +716,13 @@ const AutomationConsole: React.FC = () => {
                     onClick={() => setWorkflowForm((prev) => ({ ...prev, vmId: generateVmId() }))}
                     className="rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-xs font-semibold text-slate-200 transition hover:border-slate-600 hover:text-white"
                   >
-                    Generate
+                    {copy.workflow.generate}
                   </button>
                 </div>
               </label>
 
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">Country</span>
+                <span className="font-semibold text-slate-200">{copy.workflow.country}</span>
                 <input
                   list="workflow-country-options"
                   value={workflowForm.country}
@@ -424,7 +732,7 @@ const AutomationConsole: React.FC = () => {
               </label>
 
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">RAM</span>
+                <span className="font-semibold text-slate-200">{copy.workflow.ram}</span>
                 <input
                   value={workflowForm.ram}
                   onChange={(event) => setWorkflowForm((prev) => ({ ...prev, ram: event.target.value }))}
@@ -433,7 +741,7 @@ const AutomationConsole: React.FC = () => {
               </label>
 
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">CPU</span>
+                <span className="font-semibold text-slate-200">{copy.workflow.cpu}</span>
                 <input
                   value={workflowForm.cpu}
                   onChange={(event) => setWorkflowForm((prev) => ({ ...prev, cpu: event.target.value }))}
@@ -442,7 +750,7 @@ const AutomationConsole: React.FC = () => {
               </label>
 
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">Template</span>
+                <span className="font-semibold text-slate-200">{copy.workflow.template}</span>
                 <input
                   value={workflowForm.templateId}
                   onChange={(event) => setWorkflowForm((prev) => ({ ...prev, templateId: event.target.value }))}
@@ -451,7 +759,7 @@ const AutomationConsole: React.FC = () => {
               </label>
 
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">Command</span>
+                <span className="font-semibold text-slate-200">{copy.workflow.command}</span>
                 <input
                   value={workflowForm.command}
                   onChange={(event) => setWorkflowForm((prev) => ({ ...prev, command: event.target.value }))}
@@ -463,15 +771,15 @@ const AutomationConsole: React.FC = () => {
             <div className="rounded-[24px] border border-slate-800 bg-slate-900/60 p-5">
               <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <h3 className="text-lg font-black uppercase tracking-tight text-white">Pipeline steps</h3>
-                  <p className="text-sm text-slate-400">Turn steps on or off, then run the sequence.</p>
+                  <h3 className="text-lg font-black uppercase tracking-tight text-white">{copy.workflow.stepsTitle}</h3>
+                  <p className="text-sm text-slate-400">{copy.workflow.stepsDescription}</p>
                 </div>
                 <button
                   onClick={() => void runWorkflow()}
                   disabled={isWorkflowRunning}
                   className="rounded-full bg-sky-400 px-4 py-2 text-sm font-black uppercase tracking-[0.16em] text-slate-950 transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {isWorkflowRunning ? 'Running' : 'Run workflow'}
+                  {isWorkflowRunning ? copy.workflow.runningWorkflow : copy.workflow.runWorkflow}
                 </button>
               </div>
 
@@ -489,9 +797,9 @@ const AutomationConsole: React.FC = () => {
                           onChange={() => toggleStep(step.key)}
                           className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-sky-400"
                         />
-                        <span className="text-sm font-semibold text-white">{step.label}</span>
+                        <span className="text-sm font-semibold text-white">{copy.stepLabels[step.key]}</span>
                       </div>
-                      <p className="mt-2 pl-7 text-sm text-slate-400">{step.message || 'Idle'}</p>
+                      <p className="mt-2 pl-7 text-sm text-slate-400">{step.message || copy.stepStatuses.idle}</p>
                     </div>
                     <span
                       className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${
@@ -504,7 +812,7 @@ const AutomationConsole: React.FC = () => {
                           : 'border-slate-700 bg-slate-900 text-slate-400'
                       }`}
                     >
-                      {step.status}
+                      {copy.stepStatuses[step.status]}
                     </span>
                   </div>
                 ))}
@@ -513,7 +821,7 @@ const AutomationConsole: React.FC = () => {
 
             {commandOutput ? (
               <div className="rounded-[24px] border border-slate-800 bg-slate-950/80 p-5">
-                <h3 className="text-sm font-black uppercase tracking-[0.22em] text-slate-400">Command output</h3>
+                <h3 className="text-sm font-black uppercase tracking-[0.22em] text-slate-400">{copy.workflow.commandOutput}</h3>
                 <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words rounded-2xl bg-slate-900 p-4 font-mono text-xs text-slate-200">
                   {commandOutput}
                 </pre>
@@ -522,19 +830,19 @@ const AutomationConsole: React.FC = () => {
           </div>
 
           <aside className="space-y-4 rounded-[24px] border border-slate-800 bg-slate-900/60 p-5">
-            <h3 className="text-lg font-black uppercase tracking-tight text-white">Current workflow target</h3>
+            <h3 className="text-lg font-black uppercase tracking-tight text-white">{copy.workflow.targetTitle}</h3>
             <div className="space-y-3 text-sm text-slate-300">
               <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">VM</div>
+                <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">{copy.workflow.targetVm}</div>
                 <div className="mt-2 font-mono text-base text-white">{workflowVmId || workflowForm.vmId || '-'}</div>
               </div>
               <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Public IP</div>
-                <div className="mt-2 font-mono text-base text-white">{workflowIp || 'Pending'}</div>
+                <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">{copy.workflow.targetPublicIp}</div>
+                <div className="mt-2 font-mono text-base text-white">{workflowIp || copy.workflow.pending}</div>
               </div>
               <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">Loaded VMs</div>
-                <div className="mt-2 text-base font-semibold text-white">{isLoading ? 'Loading...' : vms.length}</div>
+                <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500">{copy.workflow.targetLoadedVms}</div>
+                <div className="mt-2 text-base font-semibold text-white">{isLoading ? copy.workflow.loading : vms.length}</div>
               </div>
             </div>
           </aside>
@@ -551,10 +859,10 @@ const AutomationConsole: React.FC = () => {
         <div className="rounded-[28px] border border-slate-800 bg-slate-950/75 p-6 shadow-[0_24px_80px_rgba(2,6,23,0.45)]">
           <div className="flex flex-col gap-3 border-b border-slate-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-emerald-400/80">Fingerprint</p>
-              <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-white">Sync by VM</h2>
+              <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-emerald-400/80">{copy.fingerprint.kicker}</p>
+              <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-white">{copy.fingerprint.title}</h2>
             </div>
-            <div className="text-sm text-slate-400">Use this only for the VMs you need to align.</div>
+            <div className="text-sm text-slate-400">{copy.fingerprint.description}</div>
           </div>
 
           <div className="mt-5 overflow-hidden rounded-[24px] border border-slate-800">
@@ -562,24 +870,24 @@ const AutomationConsole: React.FC = () => {
               <table className="min-w-full divide-y divide-slate-800 text-left">
                 <thead className="bg-slate-900/80 text-[11px] uppercase tracking-[0.22em] text-slate-500">
                   <tr>
-                    <th className="px-4 py-4 font-semibold">VM</th>
-                    <th className="px-4 py-4 font-semibold">IP</th>
-                    <th className="px-4 py-4 font-semibold">State</th>
-                    <th className="px-4 py-4 font-semibold">Fingerprint</th>
-                    <th className="px-4 py-4 font-semibold">Action</th>
+                    <th className="px-4 py-4 font-semibold">{copy.fingerprint.vm}</th>
+                    <th className="px-4 py-4 font-semibold">{copy.fingerprint.ip}</th>
+                    <th className="px-4 py-4 font-semibold">{copy.fingerprint.state}</th>
+                    <th className="px-4 py-4 font-semibold">{copy.fingerprint.fingerprint}</th>
+                    <th className="px-4 py-4 font-semibold">{copy.fingerprint.action}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800 bg-slate-950/60">
                   {isLoading ? (
                     <tr>
                       <td className="px-4 py-6 text-sm text-slate-400" colSpan={5}>
-                        Loading VMs...
+                        {copy.fingerprint.loading}
                       </td>
                     </tr>
                   ) : fingerprintRows.length === 0 ? (
                     <tr>
                       <td className="px-4 py-6 text-sm text-slate-400" colSpan={5}>
-                        No VMs available.
+                        {copy.fingerprint.empty}
                       </td>
                     </tr>
                   ) : (
@@ -589,16 +897,16 @@ const AutomationConsole: React.FC = () => {
                           <div className="font-mono text-sm font-bold text-white">{vm.id}</div>
                           <div className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-500">{vm.country}</div>
                         </td>
-                        <td className="px-4 py-4 font-mono text-sm text-slate-200">{vm.public_ip || 'Pending'}</td>
-                        <td className="px-4 py-4 text-sm text-slate-300">{vm.status}</td>
-                        <td className="px-4 py-4 text-sm text-slate-300">{vm.verification_status || 'Unknown'}</td>
+                        <td className="px-4 py-4 font-mono text-sm text-slate-200">{vm.public_ip || copy.workflow.pending}</td>
+                        <td className="px-4 py-4 text-sm text-slate-300">{translateCommonState(vm.status)}</td>
+                        <td className="px-4 py-4 text-sm text-slate-300">{translateCommonState(vm.verification_status)}</td>
                         <td className="px-4 py-4">
                           <button
                             onClick={() => void handleFingerprintSync(vm.id)}
                             disabled={busyFingerprintVm === vm.id}
                             className="rounded-full border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-slate-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                           >
-                            {busyFingerprintVm === vm.id ? 'Syncing' : 'Sync'}
+                            {busyFingerprintVm === vm.id ? copy.fingerprint.syncing : copy.fingerprint.sync}
                           </button>
                         </td>
                       </tr>
@@ -612,18 +920,17 @@ const AutomationConsole: React.FC = () => {
 
         <div className="rounded-[28px] border border-slate-800 bg-slate-950/75 p-6 shadow-[0_24px_80px_rgba(2,6,23,0.45)]">
           <div className="border-b border-slate-800 pb-5">
-            <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-amber-300/80">SMS and QR</p>
-            <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-white">Verification requests</h2>
+            <p className="text-[11px] font-bold uppercase tracking-[0.25em] text-amber-300/80">{copy.verification.kicker}</p>
+            <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-white">{copy.verification.title}</h2>
             <p className="mt-2 text-sm text-slate-400">
-              This section only keeps the SMS and QR flows. CAPTCHA widgets and related analytics are removed from the
-              dashboard.
+              {copy.verification.description}
             </p>
           </div>
 
           <form onSubmit={handleCreateVerification} className="mt-5 grid gap-4 rounded-[24px] border border-slate-800 bg-slate-900/60 p-5">
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">VM ID</span>
+                <span className="font-semibold text-slate-200">{copy.verification.vmId}</span>
                 <input
                   list="verification-vm-options"
                   value={verificationForm.vm_id}
@@ -640,7 +947,7 @@ const AutomationConsole: React.FC = () => {
               </label>
 
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">Worker ID</span>
+                <span className="font-semibold text-slate-200">{copy.verification.workerId}</span>
                 <input
                   value={verificationForm.worker_id}
                   onChange={(event) => setVerificationForm((prev) => ({ ...prev, worker_id: event.target.value }))}
@@ -649,7 +956,7 @@ const AutomationConsole: React.FC = () => {
               </label>
 
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">Type</span>
+                <span className="font-semibold text-slate-200">{copy.verification.type}</span>
                 <select
                   value={verificationForm.verification_type}
                   onChange={(event) =>
@@ -666,7 +973,7 @@ const AutomationConsole: React.FC = () => {
               </label>
 
               <label className="space-y-2 text-sm text-slate-300">
-                <span className="font-semibold text-slate-200">Provider</span>
+                <span className="font-semibold text-slate-200">{copy.verification.provider}</span>
                 <input
                   value={verificationForm.provider}
                   onChange={(event) => setVerificationForm((prev) => ({ ...prev, provider: event.target.value }))}
@@ -676,11 +983,11 @@ const AutomationConsole: React.FC = () => {
             </div>
 
             <label className="space-y-2 text-sm text-slate-300">
-              <span className="font-semibold text-slate-200">Destination</span>
+              <span className="font-semibold text-slate-200">{copy.verification.destination}</span>
               <input
                 value={verificationForm.destination}
                 onChange={(event) => setVerificationForm((prev) => ({ ...prev, destination: event.target.value }))}
-                placeholder="Phone number or QR session reference"
+                placeholder={copy.verification.destinationPlaceholder}
                 className="w-full rounded-2xl border border-slate-800 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-amber-400/40"
               />
             </label>
@@ -690,7 +997,7 @@ const AutomationConsole: React.FC = () => {
               disabled={creatingVerification}
               className="rounded-full bg-amber-300 px-4 py-3 text-sm font-black uppercase tracking-[0.16em] text-slate-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {creatingVerification ? 'Creating' : 'Create request'}
+              {creatingVerification ? copy.verification.creating : copy.verification.createRequest}
             </button>
           </form>
 
@@ -705,25 +1012,25 @@ const AutomationConsole: React.FC = () => {
               <table className="min-w-full divide-y divide-slate-800 text-left">
                 <thead className="bg-slate-900/80 text-[11px] uppercase tracking-[0.22em] text-slate-500">
                   <tr>
-                    <th className="px-4 py-4 font-semibold">Request</th>
-                    <th className="px-4 py-4 font-semibold">VM</th>
-                    <th className="px-4 py-4 font-semibold">Type</th>
-                    <th className="px-4 py-4 font-semibold">Status</th>
-                    <th className="px-4 py-4 font-semibold">Destination</th>
-                    <th className="px-4 py-4 font-semibold">Action</th>
+                    <th className="px-4 py-4 font-semibold">{copy.verification.request}</th>
+                    <th className="px-4 py-4 font-semibold">{copy.verification.vm}</th>
+                    <th className="px-4 py-4 font-semibold">{copy.verification.type}</th>
+                    <th className="px-4 py-4 font-semibold">{copy.verification.status}</th>
+                    <th className="px-4 py-4 font-semibold">{copy.verification.destination}</th>
+                    <th className="px-4 py-4 font-semibold">{copy.verification.action}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800 bg-slate-950/60">
                   {isLoading ? (
                     <tr>
                       <td className="px-4 py-6 text-sm text-slate-400" colSpan={6}>
-                        Loading requests...
+                        {copy.verification.loading}
                       </td>
                     </tr>
                   ) : recentVerificationRows.length === 0 ? (
                     <tr>
                       <td className="px-4 py-6 text-sm text-slate-400" colSpan={6}>
-                        No SMS or QR requests yet.
+                        {copy.verification.empty}
                       </td>
                     </tr>
                   ) : (
@@ -739,7 +1046,7 @@ const AutomationConsole: React.FC = () => {
                         </td>
                         <td className="px-4 py-4 text-sm text-slate-300">{request.verification_type}</td>
                         <td className="px-4 py-4">
-                          <div className="text-sm text-slate-200">{request.status}</div>
+                          <div className="text-sm text-slate-200">{translateCommonState(request.status)}</div>
                           {request.last_error ? <div className="mt-1 text-xs text-rose-300">{request.last_error}</div> : null}
                         </td>
                         <td className="px-4 py-4 text-sm text-slate-300">
@@ -752,7 +1059,7 @@ const AutomationConsole: React.FC = () => {
                             disabled={retryingId === request.id}
                             className="rounded-full border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-slate-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                           >
-                            {retryingId === request.id ? 'Retrying' : 'Retry'}
+                            {retryingId === request.id ? copy.verification.retrying : copy.verification.retry}
                           </button>
                         </td>
                       </tr>
