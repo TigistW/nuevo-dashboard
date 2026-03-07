@@ -38,9 +38,26 @@ ensure_dir "$VM_STATE_DIR"
 ensure_dir "$SOCKETS_DIR"
 ensure_dir "$LOGS_DIR"
 
-ip netns add "$NAMESPACE" 2>/dev/null || true
-ip tuntap add dev "$TAP_DEV" mode tap 2>/dev/null || true
-ip link set "$TAP_DEV" up
+if ! ip netns list | awk '{print $1}' | grep -Fxq "$NAMESPACE"; then
+  NETNS_ERR="$(ip netns add "$NAMESPACE" 2>&1)" || {
+    echo "Failed to create namespace '$NAMESPACE': $NETNS_ERR" >&2
+    echo "This usually means the process lacks root privileges or CAP_NET_ADMIN." >&2
+    exit 1
+  }
+fi
+
+if ! ip link show "$TAP_DEV" >/dev/null 2>&1; then
+  TAP_ERR="$(ip tuntap add dev "$TAP_DEV" mode tap 2>&1)" || {
+    echo "Failed to create tap device '$TAP_DEV': $TAP_ERR" >&2
+    echo "This usually means the process lacks root privileges or CAP_NET_ADMIN." >&2
+    exit 1
+  }
+fi
+
+LINK_ERR="$(ip link set "$TAP_DEV" up 2>&1)" || {
+  echo "Failed to bring tap device '$TAP_DEV' up: $LINK_ERR" >&2
+  exit 1
+}
 
 nohup "$FIRECTL_BIN" \
   --id "$VM_ID" \
@@ -54,4 +71,3 @@ nohup "$FIRECTL_BIN" \
 
 echo $! > "$VM_PID_FILE"
 print_public_ip || true
-
