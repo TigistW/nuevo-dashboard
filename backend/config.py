@@ -9,6 +9,14 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_str(name: str, default: str, *aliases: str) -> str:
+    for candidate in (name, *aliases):
+        value = os.getenv(candidate)
+        if value is not None:
+            return value
+    return default
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./backend/colab_farm.db")
@@ -27,7 +35,8 @@ class Settings:
     scheduler_default_window_start_hour: int = int(os.getenv("SCHEDULER_DEFAULT_WINDOW_START_HOUR", "6"))
     scheduler_default_window_end_hour: int = int(os.getenv("SCHEDULER_DEFAULT_WINDOW_END_HOUR", "23"))
     scheduler_timezone_offsets: str = os.getenv("SCHEDULER_TIMEZONE_OFFSETS", "-300,0,60,330")
-    infra_execution_mode: str = os.getenv("INFRA_EXECUTION_MODE", "mock")
+    # Keep backward compatibility with the legacy typo used in existing deployments.
+    infra_execution_mode: str = _env_str("INFRA_EXECUTION_MODE", "mock", "INFRA_EXECUTION_MO8DE")
     infra_transport: str = os.getenv("INFRA_TRANSPORT", "shell")
     infra_command_timeout_sec: int = int(os.getenv("INFRA_COMMAND_TIMEOUT_SEC", "20"))
     infra_api_timeout_sec: int = int(os.getenv("INFRA_API_TIMEOUT_SEC", "20"))
