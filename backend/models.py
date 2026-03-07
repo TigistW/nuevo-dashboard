@@ -205,8 +205,7 @@ class CaptchaEventCreate(BaseModel):
     provider: str
     status: str
     source: str
-    score: int | None
-    ne = None
+    score: int | None = None
     latency_ms: int = 0
     details: str | None = None
 
